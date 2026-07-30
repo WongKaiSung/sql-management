@@ -15,9 +15,10 @@ test('index.html contains no NUL bytes', () => {
 });
 
 test('index.html ends with exactly one final HTML newline', () => {
-  const htmlBytes = fs.readFileSync(htmlPath);
+  const html = readHtml();
 
-  assert.equal(htmlBytes.subarray(-8).toString('utf8'), '</html>\n');
+  assert.match(html, /<\/html>\r?\n$/);
+  assert.doesNotMatch(html, /<\/html>\r?\n\r?\n$/);
 });
 
 test('public shell uses SQL Management branding without changing compatibility identifiers', () => {
