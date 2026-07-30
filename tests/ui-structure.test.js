@@ -51,12 +51,10 @@ test('runtime assets use the complete local vendor set', () => {
     assert.match(html, new RegExp(`(?:src|href)=["']${asset}["']`));
   }
 
-  for (const lazyAsset of [
-    '/vendor/xlsx/dist/xlsx.full.min.js',
-    '/vendor/chart.js/dist/chart.umd.js',
-  ]) {
-    assert.match(html, new RegExp(`["']${lazyAsset}["']`));
-  }
+  assert.match(html, /["']\/vendor\/chart\.js\/dist\/chart\.umd\.js["']/);
+  assert.doesNotMatch(html, /\/vendor\/xlsx\//);
+  assert.doesNotMatch(html, /\bdownloadXLSX\b/);
+  assert.doesNotMatch(html, />↓ XLSX</);
 });
 
 test('runtime scripts and stylesheets do not use remote URLs', () => {
@@ -277,7 +275,7 @@ test('dynamic panes use the shared profile workflow and expose fixed-pane contro
   for (const name of ['WORKSPACE_PANELS_KEY', 'savePanelLayout', 'restorePanelLayout', 'openDynamicConnModal', 'connectDynamicPanel', 'renderDynamicProfilePicker']) {
     assert.match(html, new RegExp(name));
   }
-  for (const suffix of ['SrvTypeSelect', 'ProfileSelect', 'ConnectBtn', 'DbSelect', 'RecentDbs', 'Ledger', 'LedgerEnv', 'LedgerConnection', 'LedgerDatabase', 'LedgerSafety', 'LedgerHealth', 'Sidebar', 'SidebarResize', 'Search', 'TabBar', 'HistoryPopover', 'SnippetsPopover', 'SqlEditor', 'Results', 'FindInput', 'CellPreview', 'CopyBtn', 'DownloadBtn', 'CopyJsonBtn', 'DownloadJsonBtn', 'XlsxBtn', 'ChartBtn']) {
+  for (const suffix of ['SrvTypeSelect', 'ProfileSelect', 'ConnectBtn', 'DbSelect', 'RecentDbs', 'Ledger', 'LedgerEnv', 'LedgerConnection', 'LedgerDatabase', 'LedgerSafety', 'LedgerHealth', 'Sidebar', 'SidebarResize', 'Search', 'TabBar', 'HistoryPopover', 'SnippetsPopover', 'SqlEditor', 'Results', 'FindInput', 'CellPreview', 'CopyBtn', 'DownloadBtn', 'CopyJsonBtn', 'DownloadJsonBtn', 'ChartBtn']) {
     assert.match(template, new RegExp(`\\$\\{id\\}${suffix}`));
   }
   for (const control of ['History', 'Snippets', 'Format', 'Download .sql', 'Open', 'Explain', 'Run', 'Cancel', 'Clear', 'Paste as VALUES', 'connection-ledger', 'editor-divider', 'sidebar-resize']) {

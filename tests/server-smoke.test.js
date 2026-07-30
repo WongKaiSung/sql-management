@@ -104,10 +104,12 @@ test('server serves the application, status, and local runtime assets', { timeou
     '/api/status',
     '/vendor/codemirror/lib/codemirror.js',
     '/vendor/sql-formatter/dist/sql-formatter.min.js',
-    '/vendor/xlsx/dist/xlsx.full.min.js',
     chartAsset,
   ]) {
     const response = await fetch(`${baseUrl}${route}`);
     assert.equal(response.status, 200, `${route} should return HTTP 200`);
   }
+
+  const removedXlsxResponse = await fetch(`${baseUrl}/vendor/xlsx/dist/xlsx.full.min.js`);
+  assert.equal(removedXlsxResponse.status, 404);
 });

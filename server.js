@@ -56,7 +56,6 @@ for (const [requestPath, sourcePath] of codeMirrorBrowserAliases) {
 
 app.use('/vendor/codemirror', express.static(codeMirrorRoot));
 app.use('/vendor/sql-formatter', express.static(packageRoot('sql-formatter')));
-app.use('/vendor/xlsx', express.static(packageRoot('xlsx')));
 app.use('/vendor/chart.js', express.static(packageRoot('chart.js')));
 // HTML (and build.txt) must never be served stale — the caching reverse proxy /
 // browser otherwise keeps the old index.html after a redeploy, so new features

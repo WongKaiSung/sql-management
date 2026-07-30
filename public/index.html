@@ -1897,7 +1897,6 @@ table.result-table th { position: relative; overflow: visible; }
               <button class="export-btn" id="msDownloadBtn" onclick="downloadCSV('ms')" title="Download CSV">↓ CSV</button>
               <button class="export-btn" id="msCopyJsonBtn" onclick="copyJSON('ms')" title="Copy as JSON">⎘ JSON</button>
               <button class="export-btn" id="msDownloadJsonBtn" onclick="downloadJSON('ms')" title="Download JSON">↓ JSON</button>
-              <button class="export-btn" id="msXlsxBtn" onclick="downloadXLSX('ms')" title="Download Excel (.xlsx)">↓ XLSX</button>
               <button class="export-btn" id="msChartBtn" onclick="openChart('ms')" title="Chart these results">📊 Chart</button><button class="export-btn" type="button" aria-label="Result actions" onclick="showResultActions(event,'ms')">⋯</button>
             </div>
             <div class="results-scroll" id="msResults" role="tabpanel">
@@ -2010,7 +2009,6 @@ table.result-table th { position: relative; overflow: visible; }
               <button class="export-btn" id="pgDownloadBtn" onclick="downloadCSV('pg')" title="Download CSV">↓ CSV</button>
               <button class="export-btn" id="pgCopyJsonBtn" onclick="copyJSON('pg')" title="Copy as JSON">⎘ JSON</button>
               <button class="export-btn" id="pgDownloadJsonBtn" onclick="downloadJSON('pg')" title="Download JSON">↓ JSON</button>
-              <button class="export-btn" id="pgXlsxBtn" onclick="downloadXLSX('pg')" title="Download Excel (.xlsx)">↓ XLSX</button>
               <button class="export-btn" id="pgChartBtn" onclick="openChart('pg')" title="Chart these results">📊 Chart</button><button class="export-btn" type="button" aria-label="Result actions" onclick="showResultActions(event,'pg')">⋯</button>
             </div>
             <div class="results-scroll" id="pgResults" role="tabpanel">
@@ -6201,7 +6199,6 @@ function panelTemplateHTML(id) {
             <button class="export-btn" id="${id}DownloadBtn" onclick="downloadCSV('${id}')" title="Download CSV">↓ CSV</button>
             <button class="export-btn" id="${id}CopyJsonBtn" onclick="copyJSON('${id}')" title="Copy JSON">⎘ JSON</button>
             <button class="export-btn" id="${id}DownloadJsonBtn" onclick="downloadJSON('${id}')" title="Download JSON">↓ JSON</button>
-            <button class="export-btn" id="${id}XlsxBtn" onclick="downloadXLSX('${id}')" title="Download Excel (.xlsx)">↓ XLSX</button>
             <button class="export-btn" id="${id}ChartBtn" onclick="openChart('${id}')" title="Chart these results">📊 Chart</button><button class="export-btn" type="button" aria-label="Result actions" onclick="showResultActions(event,'${id}')">⋯</button>
           </div>
           <div class="results-scroll" id="${id}Results" role="tabpanel"><div class="empty-state">Connect and run a query</div></div>
@@ -8957,10 +8954,9 @@ function renderSnippets(side) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Added tools: lazy CDN loader, XLSX export, charting, EXPLAIN, shortcuts help,
+// Added tools: lazy asset loader, charting, EXPLAIN, shortcuts help,
 // saved-queries library. All appended so the large existing script is untouched.
 // ════════════════════════════════════════════════════════════════════════════
-const XLSX_CDN  = '/vendor/xlsx/dist/xlsx.full.min.js';
 const CHART_CDN = '/vendor/chart.js/dist/chart.umd.js';
 const _loadedScripts = {};
 function loadScriptOnce(url){
@@ -8975,21 +8971,6 @@ function loadScriptOnce(url){
 
 function _targetSide(){
   return targetSide();
-}
-
-// ── Excel (.xlsx) export ──────────────────────────────────────────────────────
-async function downloadXLSX(side){
-  const r=lastResult(side);
-  if(!r || !r.columns || !r.columns.length){ showToast('No results to export','info'); return; }
-  try{
-    await loadScriptOnce(XLSX_CDN);
-    const cell=v=> (v===null||v===undefined) ? '' : (typeof v==='object' ? JSON.stringify(v) : v);
-    const aoa=[r.columns.slice(), ...r.rows.map(row=>r.columns.map(c=>cell(row[c])))];
-    const ws=XLSX.utils.aoa_to_sheet(aoa);
-    const wb=XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Results');
-    XLSX.writeFile(wb, csvFilename(side).replace(/\.csv$/i, '.xlsx'));
-  }catch(e){ showToast('Excel export failed: '+e.message,'error'); }
 }
 
 // ── Charting ──────────────────────────────────────────────────────────────────
@@ -9306,7 +9287,6 @@ function applyWorkspaceImport(categories) {
         <tr><td><kbd>Shift</kbd>+<kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>Expand <code>SELECT *</code> to column list</td></tr>
         <tr><td>🔎 Explain</td><td>Estimated plan (SQL Server) / <code>EXPLAIN</code> (PostgreSQL)</td></tr>
         <tr><td>📊 Chart</td><td>Chart the current result set</td></tr>
-        <tr><td>↓ XLSX</td><td>Export results to Excel</td></tr>
         <tr><td><kbd>?</kbd></td><td>Show this shortcuts panel</td></tr>
       </tbody></table>
     </div>
