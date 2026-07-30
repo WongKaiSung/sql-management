@@ -211,7 +211,7 @@
   function validateWorkspacePayload(payload) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)
       || !payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) {
-      return { ok: false, error: 'Invalid SQLConnect workspace file' };
+      return { ok: false, error: 'Invalid SQL Management workspace file' };
     }
     if (payload.version !== WORKSPACE_VERSION) {
       return { ok: false, error: `Unsupported workspace version: ${payload.version}` };

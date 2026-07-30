@@ -166,8 +166,8 @@ test('buildWorkspacePayload removes secrets from ordinary data at every depth', 
 test('validateWorkspacePayload accepts version 1 and rejects invalid workspace shapes', () => {
   const valid = { version: 1, data: { sqlSnippets: [] } };
   assert.deepEqual(validateWorkspacePayload(valid), { ok: true, value: valid });
-  assert.deepEqual(validateWorkspacePayload([]), { ok: false, error: 'Invalid SQLConnect workspace file' });
-  assert.deepEqual(validateWorkspacePayload({ version: 1 }), { ok: false, error: 'Invalid SQLConnect workspace file' });
+  assert.deepEqual(validateWorkspacePayload([]), { ok: false, error: 'Invalid SQL Management workspace file' });
+  assert.deepEqual(validateWorkspacePayload({ version: 1 }), { ok: false, error: 'Invalid SQL Management workspace file' });
   assert.deepEqual(validateWorkspacePayload({ version: 2, data: {} }), {
     ok: false, error: 'Unsupported workspace version: 2',
   });

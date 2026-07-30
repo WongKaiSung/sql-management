@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SQLConnect</title>
+<title>SQL Management</title>
 <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.min.css">
 <link rel="stylesheet" href="/vendor/codemirror/theme/dracula.min.css">
 <link rel="stylesheet" href="/vendor/codemirror/theme/eclipse.min.css">
@@ -1767,14 +1767,14 @@ table.result-table th { position: relative; overflow: visible; }
 <body>
 
 <section id="startupError" class="startup-error" role="alert" aria-live="assertive" tabindex="-1" hidden>
-  <strong>SQLConnect could not start the query editor.</strong>
+  <strong>SQL Management could not start the query editor.</strong>
   <span id="startupErrorMessage"></span>
   <div class="startup-error-actions"><button class="btn btn-primary btn-sm" type="button" onclick="location.reload()">Reload</button></div>
 </section>
 
 <!-- ── Header ─────────────────────────────────────────────── -->
 <header id="appHeader">
-  <h1>SQLConnect</h1>
+  <h1>SQL Management</h1>
   <span class="subtitle">SQL Management</span>
   <span class="subtitle" id="appVersion" title="Deployed version" style="opacity:.55"></span>
   <div class="mode-selector" role="group" aria-label="Workspace view">
@@ -9225,7 +9225,7 @@ function workspaceCurrentData() {
 function exportWorkspace() {
   const payload = SQLConnectUX.buildWorkspacePayload(workspaceCurrentData());
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = `sqlconnect-workspace-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.json`; a.click(); URL.revokeObjectURL(url);
+  const a = document.createElement('a'); a.href = url; a.download = `sql-management-workspace-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.json`; a.click(); URL.revokeObjectURL(url);
   showToast('Workspace exported — passwords are excluded', 'success');
 }
 let pendingWorkspacePayload = null;

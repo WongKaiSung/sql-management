@@ -20,6 +20,18 @@ test('index.html ends with exactly one final HTML newline', () => {
   assert.equal(htmlBytes.subarray(-8).toString('utf8'), '</html>\n');
 });
 
+test('public shell uses SQL Management branding without changing compatibility identifiers', () => {
+  const html = readHtml();
+
+  assert.match(html, /<title>SQL Management<\/title>/);
+  assert.match(html, /<h1>SQL Management<\/h1>/);
+  assert.match(html, /SQL Management could not start the query editor\./);
+  assert.match(html, /sql-management-workspace-/);
+  assert.match(html, /SQLConnectUX/);
+  assert.match(html, /sqlconnectWorkspacePanels:v1/);
+  assert.match(html, /sqlconnectWorkspaceBackup:v1/);
+});
+
 test('runtime assets use the complete local vendor set', () => {
   const html = readHtml();
   const expectedAssets = [
