@@ -13,3 +13,4 @@ iisnode/
 *.bak
 *.stackdump
 public/index_FIXED.html
+.worktrees/
