@@ -1,7 +1,7 @@
 {
-  "name": "dualsql",
+  "name": "sql-management",
   "version": "1.0.0",
-  "description": "DualSQL — side-by-side SQL client for MSSQL and PostgreSQL",
+  "description": "SQL Management — web-based SQL client for MSSQL and PostgreSQL",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

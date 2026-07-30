@@ -1,6 +1,6 @@
 <#
   setup-iis-site.ps1
-  Creates the IIS application pool + website for SQLConnect (iisnode hosting)
+  Creates the IIS application pool + website for SQL Management (iisnode hosting)
   and grants the app-pool identity the file permissions iisnode needs.
 
   Run from an ELEVATED PowerShell prompt (Run as Administrator) AFTER you have

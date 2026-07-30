@@ -1,4 +1,4 @@
-# Hosting DualSQL / SQLConnect with Docker
+# Hosting SQL Management with Docker
 
 The app is a single Node/Express process serving the `/api` routes and the
 static UI in `public/`. The image runs `node server.js` directly — no IIS,
@@ -112,7 +112,7 @@ PID 1 and forwards `SIGTERM` to Node.
    machines, use `http://<target-pc-ip>:3000` and allow the port through
    Windows Firewall:
    ```powershell
-   New-NetFirewallRule -DisplayName "DualSQL 3000" -Direction Inbound `
+   New-NetFirewallRule -DisplayName "SQL Management 3000" -Direction Inbound `
      -Protocol TCP -LocalPort 3000 -Action Allow
    ```
 

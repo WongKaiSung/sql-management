@@ -4,7 +4,7 @@ This file provides guidance to Codex when working with code in this repository.
 
 ## Project Overview
 
-**SQLConnect** — a web-based SQL management tool supporting SQL Server (MSSQL) and PostgreSQL. Handles day-to-day querying with connection profiles, read-only profile enforcement, query history, schema browser, CSV/JSON export, column stats, query snippets, resizable result columns, find-in-results, row counts, paste-as-VALUES, and an optional split-view mode for side-by-side work across both connections.
+**SQL Management** — a web-based SQL management tool supporting SQL Server (MSSQL) and PostgreSQL. Handles day-to-day querying with connection profiles, read-only profile enforcement, query history, schema browser, CSV/JSON export, column stats, query snippets, resizable result columns, find-in-results, row counts, paste-as-VALUES, and an optional split-view mode for side-by-side work across both connections.
 
 ## Commands
 

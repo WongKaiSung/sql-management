@@ -1,4 +1,4 @@
-# DualSQL / SQLConnect — container image
+# SQL Management — container image
 # Node/Express app serving the API and the static UI in public/.
 
 FROM node:22-alpine

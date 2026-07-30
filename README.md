@@ -1,4 +1,4 @@
-# DualSQL
+# SQL Management
 
 Side-by-side SQL client for **MSSQL** and **PostgreSQL**. Originally built for migration validation; now used for daily querying with per-table query persistence, query history, schema browser, connection profiles, and result comparison.
 

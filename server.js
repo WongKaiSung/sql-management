@@ -1889,10 +1889,10 @@ const HOST = process.env.HOST || '127.0.0.1';
 
 const server = isNaN(parseInt(PORT))
   ? app.listen(PORT, () => {
-      console.log(`\n  DualSQL → IIS (iisnode)\n`);
+      console.log(`\n  SQL Management → IIS (iisnode)\n`);
     })
   : app.listen(parseInt(PORT), HOST, () => {
-      console.log(`\n  DualSQL → http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\n`);
+      console.log(`\n  SQL Management → http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\n`);
     });
 
 async function shutdown(signal) {

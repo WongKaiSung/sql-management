@@ -1,4 +1,4 @@
-# Hosting SQLConnect on IIS with iisnode
+# Hosting SQL Management on IIS with iisnode
 
 IIS runs `node.exe` in-process through the **iisnode** module. Incoming requests
 are rewritten to `server.js`, and Express serves both the `/api` routes and the
@@ -77,13 +77,13 @@ Or do it by hand in **IIS Manager**:
    `D:\KS\SQL` and **modify** on `D:\KS\SQL\logs` and `D:\KS\SQL\iisnode`
    (iisnode writes stdout/stderr logs there).
 
-Browse to the site. You should see the SQLConnect UI.
+Browse to the site. You should see the SQL Management UI.
 
 ---
 
 ## 4. Why one Node process (important for this app)
 
-SQLConnect keeps its connection state in **module-global variables**
+SQL Management keeps its connection state in **module-global variables**
 (`mssqlConfig`, `pgConfig`, read-only flags). If IIS ran more than one Node
 process for the site, each would hold its own connection state and IIS would
 round-robin requests between them — so a connection you set up could "vanish"
