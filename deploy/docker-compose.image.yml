@@ -1,0 +1,34 @@
+# TEMPLATE — build-image.ps1 copies this into the dist bundle with the exact
+# image tag baked in. You never edit or copy this file to the server yourself;
+# use dist\dualsql-<tag>\docker-compose.yml instead.
+services:
+  dualsql:
+    image: dualsql:0.0.0-TEMPLATE
+    # ^ replaced by build-image.ps1 with the unique per-build tag
+    container_name: dualsql
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      QUERY_TIMEOUT_MS: 60000
+
+      # ── SQL Server default profile ──
+      MSSQL_SERVER: ${MSSQL_SERVER:-host.docker.internal}
+      MSSQL_USER: ${MSSQL_USER:-sa}
+      MSSQL_PASSWORD: ${MSSQL_PASSWORD:-}
+      MSSQL_TRUST_SERVER_CERT: ${MSSQL_TRUST_SERVER_CERT:-true}
+      MSSQL_ENCRYPT: ${MSSQL_ENCRYPT:-false}
+      # MSSQL_DEFAULT_DB:
+
+      # ── PostgreSQL default profile ──
+      PG_HOST: ${PG_HOST:-host.docker.internal}
+      PG_PORT: ${PG_PORT:-5432}
+      PG_USER: ${PG_USER:-postgres}
+      PG_PASSWORD: ${PG_PASSWORD:-}
+      # PG_DEFAULT_DB:
+    volumes:
+      - ./logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

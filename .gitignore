@@ -1,0 +1,15 @@
+node_modules/
+.env
+*.log
+*.err
+logs/
+docs/superpowers/
+.superpowers/
+.claude/
+.DS_Store
+.pnpm-store/
+dist/
+iisnode/
+*.bak
+*.stackdump
+public/index_FIXED.html

@@ -1,0 +1,31 @@
+node_modules
+npm-debug.log
+.env
+.env.*
+logs
+iisnode
+*.log
+*.err
+*.bak
+.git
+.gitignore
+.claude
+docs
+deploy
+server.js.bak
+reclaim-pg.js
+bash.exe.stackdump
+# stale UI copies — public/index.html is the only page that ships
+public/index_FIXED.html
+public/*.bak
+dist
+# large local artifacts — not needed in the build context
+SQL.zip
+*.tar
+web.config
+Dockerfile
+.dockerignore
+docker-compose.yml
+README.md
+CLAUDE.md
+LICENSE
