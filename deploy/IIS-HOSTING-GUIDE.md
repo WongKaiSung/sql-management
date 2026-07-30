@@ -34,14 +34,14 @@ falls back to listening on the named pipe that iisnode provides (the
 
 After installing, run `iisreset`.
 
-> The `web.config` in `D:\KS\SQL` already wires up the iisnode handler and the
+> The `web.config` in `C:\apps\sql-management` already wires up the iisnode handler and the
 > rewrite rules — you don't edit it for a basic deploy.
 
 ---
 
 ## 2. Prepare the app
 
-From a normal prompt in `D:\KS\SQL`:
+From a normal prompt in `C:\apps\sql-management`:
 
 ```powershell
 npm install                 # if node_modules isn't already present
@@ -64,17 +64,17 @@ needs to write its logs):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\deploy\setup-iis-site.ps1 `
-    -SiteName "SQLConnect" -HostName "sql.yourcompany.local" -Port 80
+    -SiteName "SQLConnect" -HostName "sql.example.com" -Port 80
 ```
 
 Or do it by hand in **IIS Manager**:
 
 1. **Application Pools** ▸ **Add Application Pool…** — name `SQLConnect`,
    **.NET CLR version: No Managed Code**, pipeline Integrated.
-2. **Sites** ▸ **Add Website…** — name `SQLConnect`, physical path `D:\KS\SQL`,
+2. **Sites** ▸ **Add Website…** — name `SQLConnect`, physical path `C:\apps\sql-management`,
    app pool `SQLConnect`, binding `http` on port `80` (host name optional).
 3. Grant the app-pool identity (`IIS AppPool\SQLConnect`) **read+execute** on
-   `D:\KS\SQL` and **modify** on `D:\KS\SQL\logs` and `D:\KS\SQL\iisnode`
+   `C:\apps\sql-management` and **modify** on `C:\apps\sql-management\logs` and `C:\apps\sql-management\iisnode`
    (iisnode writes stdout/stderr logs there).
 
 Browse to the site. You should see the SQL Management UI.
@@ -123,14 +123,14 @@ control.
 | **Connection "resets" between requests** | More than one Node process — confirm `nodeProcessCountPerApplication="1"` and no web garden. |
 | **Long queries time out at IIS** | iisnode/IIS request timeout shorter than `QUERY_TIMEOUT_MS`. Lengthen via `<iisnode requestTimeout="…">` (ms) and the app pool's request limits if needed. |
 
-Logs to check first: `D:\KS\SQL\iisnode\*.log` (Node stdout/stderr captured by
-iisnode) and `D:\KS\SQL\logs\audit-YYYY-MM-DD.log` (the app's per-query audit
+Logs to check first: `C:\apps\sql-management\iisnode\*.log` (Node stdout/stderr captured by
+iisnode) and `C:\apps\sql-management\logs\audit-YYYY-MM-DD.log` (the app's per-query audit
 log).
 
 ---
 
 ## Files in this deploy
 
-- `..\web.config` — iisnode handler + rewrite rules + single-process pin (sits in the site root, `D:\KS\SQL`).
+- `..\web.config` — iisnode handler + rewrite rules + single-process pin (sits in the site root, `C:\apps\sql-management`).
 - `setup-iis-site.ps1` — creates the app pool/site and grants iisnode the file permissions it needs.
 - `IIS-HOSTING-GUIDE.md` — this guide.

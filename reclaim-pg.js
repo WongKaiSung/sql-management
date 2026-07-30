@@ -14,7 +14,7 @@
  * shared PostgreSQL service to fix this — that drops everyone.
  *
  * Point it at the real server (the .env defaults to localhost, which may be wrong):
- *   node reclaim-pg.js --host=pnbdev.example --user=postgres --password=secret
+ *   node reclaim-pg.js --host=db.example.com --user=postgres --password=example-password
  * (or set PGHOST/PGPORT/PGUSER/PGPASSWORD env vars; falls back to PG_* in .env)
  *
  * Usage:

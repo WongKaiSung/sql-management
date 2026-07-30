@@ -27,7 +27,7 @@ no iisnode. Connection settings come from environment variables.
 
 ## 1. Build
 
-From the project root (`D:\KS\SQL`):
+From the project root (`C:\apps\sql-management`):
 
 ```powershell
 docker build -t dualsql:latest .
@@ -129,11 +129,11 @@ machine. Set the DB hosts to wherever the databases actually live, reachable
 A `.env` for the target might look like:
 
 ```
-MSSQL_SERVER=dbserver.corp.local
+MSSQL_SERVER=db.example.com
 MSSQL_USER=sa
 MSSQL_PASSWORD=your-strong-password
 MSSQL_TRUST_SERVER_CERT=false
-PG_HOST=dbserver.corp.local
+PG_HOST=db.example.com
 PG_USER=postgres
 PG_PASSWORD=your-pg-password
 ```

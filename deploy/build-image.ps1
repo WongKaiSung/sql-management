@@ -11,7 +11,7 @@
     - DEPLOY.txt               the two commands to run on the server
 
   Usage (from anywhere, Docker Desktop running):
-    powershell -ExecutionPolicy Bypass -File D:\KS\SQL\deploy\build-image.ps1
+    powershell -ExecutionPolicy Bypass -File C:\apps\sql-management\deploy\build-image.ps1
 #>
 
 [CmdletBinding()]

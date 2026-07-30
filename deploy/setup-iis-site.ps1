@@ -9,15 +9,15 @@
 
   Usage:
     powershell -ExecutionPolicy Bypass -File .\deploy\setup-iis-site.ps1 `
-        -SiteName "SQLConnect" -HostName "sql.yourcompany.local" -Port 80
+        -SiteName "SQLConnect" -HostName "sql.example.com" -Port 80
 #>
 
 [CmdletBinding()]
 param(
     [string]$SiteName = "SQLConnect",
     [string]$AppPool  = "SQLConnect",
-    [string]$AppDir   = "D:\KS\SQL",
-    [string]$HostName = "",      # e.g. sql.yourcompany.local; blank = catch-all on the port
+    [string]$AppDir   = "C:\apps\sql-management",
+    [string]$HostName = "",      # e.g. sql.example.com; blank = catch-all on the port
     [int]   $Port     = 80
 )
 
