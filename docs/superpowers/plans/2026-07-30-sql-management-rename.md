@@ -181,7 +181,6 @@ git commit -m "Rename application shell to SQL Management"
 ### Task 3: Rename safe project metadata and documentation
 
 **Files:**
-- Create: `tests/project-branding.test.js`
 - Modify: `package.json:2-4`
 - Modify: `package-lock.json:2-9`
 - Modify: `README.md:1-3`
@@ -199,69 +198,20 @@ git commit -m "Rename application shell to SQL Management"
 
 **Interfaces:**
 - Consumes: package metadata, documentation headings, server startup output, and existing deployment defaults
-- Produces: consistent SQL Management presentation plus executable tests that lock compatibility identifiers
+- Produces: consistent SQL Management presentation with compatibility identifiers verified by structured checks and an explicit audit
 
-- [ ] **Step 1: Add failing branding and compatibility tests**
-
-Create `tests/project-branding.test.js` with:
-
-```javascript
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const root = path.resolve(__dirname, '..');
-const read = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8');
-
-test('project metadata and documentation use SQL Management branding', () => {
-  const pkg = JSON.parse(read('package.json'));
-  const lock = JSON.parse(read('package-lock.json'));
-
-  assert.equal(pkg.name, 'sql-management');
-  assert.equal(pkg.description, 'SQL Management — web-based SQL client for MSSQL and PostgreSQL');
-  assert.equal(lock.name, 'sql-management');
-  assert.equal(lock.packages[''].name, 'sql-management');
-
-  const brandedFiles = [
-    ['README.md', /^# SQL Management$/m],
-    ['AGENTS.md', /\*\*SQL Management\*\*/],
-    ['CLAUDE.md', /\*\*SQL Management\*\*/],
-    ['.env.example', /^# SQL Management — copy to \.env/m],
-    ['Dockerfile', /^# SQL Management — container image/m],
-    ['LICENSE', /Copyright \(c\) 2026 SQL Management contributors/],
-    ['server.js', /SQL Management →/],
-    ['web.config', /config for SQL Management/],
-    ['deploy/DOCKER-HOSTING-GUIDE.md', /^# Hosting SQL Management with Docker$/m],
-    ['deploy/IIS-HOSTING-GUIDE.md', /^# Hosting SQL Management on IIS with iisnode$/m],
-  ];
-
-  for (const [file, pattern] of brandedFiles) {
-    assert.match(read(...file.split('/')), pattern, file);
-  }
-});
-
-test('compatibility-sensitive identifiers remain stable', () => {
-  assert.match(read('docker-compose.yml'), /^  dualsql:$/m);
-  assert.match(read('docker-compose.yml'), /container_name: dualsql/);
-  assert.match(read('public', 'ux-helpers.js'), /root\.SQLConnectUX = api/);
-  assert.match(read('public', 'index.html'), /sqlconnectWorkspacePanels:v1/);
-  assert.match(read('reclaim-pg.js'), /application_name LIKE 'sqlconnect%'/);
-  assert.match(read('deploy', 'setup-iis-site.ps1'), /\$SiteName = "SQLConnect"/);
-});
-```
-
-- [ ] **Step 2: Run the new test and confirm the metadata assertions fail**
+- [ ] **Step 1: Record the old metadata and compatibility baseline**
 
 Run:
 
 ```powershell
-node --test tests/project-branding.test.js
+node -e "const p=require('./package.json'); const l=require('./package-lock.json'); console.log(JSON.stringify({packageName:p.name,description:p.description,lockName:l.name,lockRootName:l.packages[''].name},null,2))"
+rg -n '(SQLConnectUX|sqlconnectWorkspacePanels:v1|application_name LIKE|\$SiteName|container_name: dualsql)' public reclaim-pg.js deploy docker-compose.yml
 ```
 
-Expected: the test reports old `dualsql`, DualSQL, and SQLConnect public metadata; compatibility assertions already pass.
+Expected: package metadata reports `dualsql`; the compatibility command lists the identifiers that must survive the rename.
 
-- [ ] **Step 3: Update safe package metadata**
+- [ ] **Step 2: Update safe package metadata**
 
 Apply these exact values in `package.json` and the two root-name fields in `package-lock.json`:
 
@@ -270,7 +220,7 @@ Apply these exact values in `package.json` and the two root-name fields in `pack
 "description": "SQL Management — web-based SQL client for MSSQL and PostgreSQL"
 ```
 
-- [ ] **Step 4: Update public prose without renaming operational identifiers**
+- [ ] **Step 3: Update public prose without renaming operational identifiers**
 
 Use **SQL Management** for the file headings, comments, copyright, server startup banner, and prose locations listed in the Files section. Keep these exact technical values unchanged wherever they occur:
 
@@ -287,19 +237,19 @@ $AppPool = "SQLConnect"
 
 In deployment guides, change product prose and headings but retain commands, image names, container names, IIS site names, and IIS app-pool names.
 
-- [ ] **Step 5: Run the branding test and full project checks**
+- [ ] **Step 4: Validate structured metadata and run the full project checks**
 
 Run:
 
 ```powershell
-node --test tests/project-branding.test.js
+node -e "const assert=require('node:assert/strict'); const p=require('./package.json'); const l=require('./package-lock.json'); assert.equal(p.name,'sql-management'); assert.equal(p.description,'SQL Management — web-based SQL client for MSSQL and PostgreSQL'); assert.equal(l.name,'sql-management'); assert.equal(l.packages[''].name,'sql-management')"
 npm run check
 npm test
 ```
 
 Expected: all commands exit 0.
 
-- [ ] **Step 6: Audit every residual old-name occurrence against the compatibility allowlist**
+- [ ] **Step 5: Audit every residual old-name occurrence against the compatibility allowlist**
 
 Run:
 
@@ -309,12 +259,12 @@ rg -n --hidden -g '!.env' -g '!node_modules/**' -g '!.pnpm-store/**' -g '!logs/*
 
 Expected: residual occurrences are limited to Docker/build artifact identifiers, `SQLConnectUX`, localStorage/workspace compatibility keys, PostgreSQL `sqlconnect%` application-name matching, and preserved IIS `$SiteName`/`$AppPool` values. No title, heading, descriptive package metadata, startup banner, copyright, or public error message uses the old names.
 
-- [ ] **Step 7: Commit metadata and documentation**
+- [ ] **Step 6: Commit metadata and documentation**
 
 Run:
 
 ```powershell
-git add -- .env.example AGENTS.md CLAUDE.md Dockerfile LICENSE README.md package.json package-lock.json server.js web.config deploy tests/project-branding.test.js
+git add -- .env.example AGENTS.md CLAUDE.md Dockerfile LICENSE README.md package.json package-lock.json server.js web.config deploy
 git diff --cached --check
 git commit -m "Rename project branding to SQL Management"
 ```
