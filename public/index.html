@@ -6103,7 +6103,7 @@ function csvFilename(side) {
 }
 
 function setExportBtnsVisible(side, visible) {
-  const ids = [side + 'CopyBtn', side + 'DownloadBtn', side + 'CopyJsonBtn', side + 'DownloadJsonBtn', side + 'XlsxBtn', side + 'ChartBtn'];
+  const ids = [side + 'CopyBtn', side + 'DownloadBtn', side + 'CopyJsonBtn', side + 'DownloadJsonBtn', side + 'ChartBtn'];
   ids.forEach(id => {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('visible', visible);

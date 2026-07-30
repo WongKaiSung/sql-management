@@ -54,6 +54,7 @@ test('runtime assets use the complete local vendor set', () => {
   assert.match(html, /["']\/vendor\/chart\.js\/dist\/chart\.umd\.js["']/);
   assert.doesNotMatch(html, /\/vendor\/xlsx\//);
   assert.doesNotMatch(html, /\bdownloadXLSX\b/);
+  assert.doesNotMatch(html, /\bXlsxBtn\b/);
   assert.doesNotMatch(html, />↓ XLSX</);
 });
 
