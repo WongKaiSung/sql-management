@@ -14,6 +14,12 @@ services:
       PORT: 3000
       QUERY_TIMEOUT_MS: 60000
 
+      # DNS server that serves your internal reverse (PTR) zone, so the clients
+      # panel can name the machine behind each IP. Required in the container:
+      # musl queries all resolv.conf nameservers at once and takes the first
+      # answer, so a public resolver's NXDOMAIN would suppress every hostname.
+      RDNS_SERVERS: ${RDNS_SERVERS:-}
+
       # ── SQL Server default profile ──
       MSSQL_SERVER: ${MSSQL_SERVER:-host.docker.internal}
       MSSQL_USER: ${MSSQL_USER:-sa}
