@@ -20,17 +20,41 @@ const RDNS_TTL_MS = 30 * 60 * 1000;
 const rdnsCache = new Map();    // ip → { host: string|null, at: epoch ms }
 const rdnsInFlight = new Set();
 
+// Which resolver answers a PTR query is platform-dependent, and getting it wrong
+// silently yields no hostnames at all:
+//   - Windows: the OS resolver picks the nameserver that actually serves the
+//     private zone, so getnameinfo (dns.lookupService) works. Bare c-ares
+//     (dns.reverse) does not — it walks resolv.conf in order and stops on the
+//     first NXDOMAIN, which a public resolver returns instantly.
+//   - musl/Alpine (the container): getnameinfo queries every nameserver
+//     concurrently and takes the first reply, so a public resolver's NXDOMAIN
+//     beats the internal server and hostnames never resolve.
+// RDNS_SERVERS pins lookups to the internal DNS, bypassing resolv.conf and its
+// ordering rules entirely. Unset, we fall back to the OS resolver.
+// Resolved lazily: .env is loaded further down, so process.env is not populated
+// at module-evaluation time.
+let rdnsResolver;               // undefined = not yet initialised, null = none
+
+function getRdnsResolver() {
+  if (rdnsResolver !== undefined) return rdnsResolver;
+  const servers = (process.env.RDNS_SERVERS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!servers.length) return (rdnsResolver = null);
+  const r = new dns.Resolver();
+  r.setServers(servers);
+  return (rdnsResolver = r);
+}
+
 function rdnsLookup(ip) {
   const hit = rdnsCache.get(ip);
   if (hit && Date.now() - hit.at < RDNS_TTL_MS) return hit.host;
   if (!rdnsInFlight.has(ip)) {
     rdnsInFlight.add(ip);
-    // lookupService (getnameinfo) not reverse (c-ares): c-ares queries the
-    // configured nameservers in order, and if a public resolver is listed ahead
-    // of the internal one it answers NXDOMAIN for private PTR zones and c-ares
-    // stops there. getnameinfo defers to the OS resolver, which gets it right.
-    dns.lookupService(ip, 0)
-      .then(r => rdnsCache.set(ip, { host: r.hostname || null, at: Date.now() }))
+    const resolver = getRdnsResolver();
+    const pending = resolver
+      ? resolver.reverse(ip).then(names => names[0] || null)
+      : dns.lookupService(ip, 0).then(r => r.hostname || null);
+    pending
+      .then(host => rdnsCache.set(ip, { host: host || null, at: Date.now() }))
       .catch(() => rdnsCache.set(ip, { host: null, at: Date.now() }))
       .finally(() => rdnsInFlight.delete(ip));
   }
@@ -573,7 +597,19 @@ async function connPgPool(conn, database) {
   }
   conn.pgPoolSwitch = (async () => {
     if (conn.pgPool) await conn.pgPool.end().catch(() => {});
-    conn.pgPool = new Pool({ ...conn.pgConfig, database });
+    // application_name makes this app's own backends identifiable in
+    // pg_stat_activity (they were previously blank, which is also why
+    // reclaim-pg.js --app, which matches 'sqlconnect%', never matched anything).
+    conn.pgPool = new Pool({ ...conn.pgConfig, database, application_name: 'sqlconnect' });
+    // node-postgres emits 'error' on the POOL when an idle client's backend dies
+    // — precisely what "Kill idle" does to this app's own pooled connections.
+    // An 'error' event with no listener is an unhandled EventEmitter error and
+    // takes the whole process down, so this listener is load-bearing, not
+    // diagnostic: without it the container dies mid-request and the proxy in
+    // front answers with an HTML error page.
+    conn.pgPool.on('error', err => {
+      console.error('[pg pool] idle client error (backend terminated?):', err.message);
+    });
     conn.pgPoolDb = database;
   })();
   try { await conn.pgPoolSwitch; } finally { conn.pgPoolSwitch = null; }

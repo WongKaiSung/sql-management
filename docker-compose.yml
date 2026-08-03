@@ -11,6 +11,8 @@ services:
       HOST: 0.0.0.0
       PORT: 3000
       QUERY_TIMEOUT_MS: 60000
+      # DNS server serving your internal reverse (PTR) zone — see .env.example.
+      RDNS_SERVERS: ${RDNS_SERVERS:-}
 
       # ── SQL Server default profile ──
       MSSQL_SERVER: ${MSSQL_SERVER:-host.docker.internal}

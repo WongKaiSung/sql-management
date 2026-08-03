@@ -7402,13 +7402,20 @@ async function api(url, method = 'GET', body = null) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(url, opts);
-  const data = await res.json();
-  if (!res.ok) {
-    const err = new Error(data.error || res.statusText);
-    err.lineNumber = data.lineNumber || null;
-    err.position = data.position || null;
-    err.hint = data.hint || null;
-    err.code = data.code || null;
+  // A reverse proxy in front of the app answers with an HTML page when the app
+  // is down or the request timed out. Parsing that as JSON surfaced as
+  // "Unexpected token '<'", which hid the real status — check the body type
+  // first so the toast says "HTTP 502 Bad Gateway" instead.
+  const isJson = (res.headers.get('content-type') || '').includes('application/json');
+  const data = isJson ? await res.json().catch(() => null) : null;
+  if (!res.ok || data === null) {
+    const err = new Error((data && data.error) || `HTTP ${res.status} ${res.statusText}`.trim());
+    if (data) {
+      err.lineNumber = data.lineNumber || null;
+      err.position = data.position || null;
+      err.hint = data.hint || null;
+      err.code = data.code || null;
+    }
     err.status = res.status;
     throw err;
   }
