@@ -83,9 +83,9 @@ Browse to the site. You should see the SQL Management UI.
 
 ## 4. Why one Node process (important for this app)
 
-SQL Management keeps its connection state in **module-global variables**
-(`mssqlConfig`, `pgConfig`, read-only flags). If IIS ran more than one Node
-process for the site, each would hold its own connection state and IIS would
+SQL Management keeps each browser's connection state in **process memory**,
+keyed by the `sqlmgmt_sid` session cookie. If IIS ran more than one Node process
+for the site, each would hold its own copy of those sessions and IIS would
 round-robin requests between them — so a connection you set up could "vanish"
 on the next request.
 

@@ -3,7 +3,9 @@
 SQL Management is a self-hosted browser interface for working with Microsoft SQL Server and PostgreSQL. It combines everyday querying, schema exploration, connection profiles, and side-by-side comparison in one lightweight Node.js application.
 
 > [!IMPORTANT]
-> SQL Management is a single-tenant tool. Its HTTP API has no user authentication and uses the database credentials configured in the running server. Keep the default loopback binding unless you place it behind appropriate network and authentication controls.
+> SQL Management's HTTP API has no user authentication and uses the database credentials configured in the running server. Keep the default loopback binding unless you place it behind appropriate network and authentication controls.
+>
+> When several people share one server, each browser gets its own connections (tracked by a `sqlmgmt_sid` session cookie), so switching server or profile affects only the person who did it. That is isolation, not access control — anyone who can reach the API gets a session and the configured credentials with it.
 
 ## Features
 

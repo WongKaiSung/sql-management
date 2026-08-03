@@ -148,6 +148,9 @@ PG_PASSWORD=your-pg-password
 - Set `MSSQL_TRUST_SERVER_CERT=false` and real credentials for production.
 - Pass passwords as environment variables or Docker secrets — don't bake them
   into the image.
-- The app keeps connection state in module-global variables, so run a **single
-  replica**. Don't scale this service to multiple containers behind a load
-  balancer, or connection state will appear to "vanish" between requests.
+- The app keeps each browser's connection state in process memory (keyed by the
+  `sqlmgmt_sid` session cookie), so run a **single replica**. Don't scale this
+  service to multiple containers behind a load balancer, or connection state
+  will appear to "vanish" between requests.
+- If a caching reverse proxy sits in front, leave `/api` responses uncached —
+  the app marks them `no-store` because they carry the session cookie.

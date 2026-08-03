@@ -26,10 +26,10 @@ No build step, no test suite — single-file Express app serving a single static
 
 **Two files matter:**
 
-- `server.js` — Express backend. Loads `.env` manually (no `dotenv` dep). Connection state is module-global (`mssqlConfig`, `pgConfig`, `mssqlReadOnly`, `pgReadOnly`). Single-tenant by design.
+- `server.js` — Express backend. Loads `.env` manually (no `dotenv` dep). Connection state is **per browser session**, not global: `attachSession` (mounted on `/api`) resolves a `sqlmgmt_sid` cookie to a session record holding the four fixed slots (`ms`/`pg`/`ms2`/`pg2`) plus that browser's added panels. Handlers reach them via `req.conns.<slot>` and `req.session.conns`. No authentication — sessions separate people's connections, they do not authorise anyone.
 - `public/index.html` — single-page app, all JS/CSS inline, CodeMirror 5 for editors, no framework. ~6200 lines.
 
-**Env vars** (loaded from `.env`, see `.env.example` for full list): `HOST` (default `127.0.0.1` — bind address), `PORT` (default 3000), `MSSQL_SERVER`/`MSSQL_USER`/`MSSQL_PASSWORD`, `MSSQL_TRUST_SERVER_CERT` (default `true`), `MSSQL_ENCRYPT` (default `false`), `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASSWORD`, `MSSQL_DEFAULT_DB`/`PG_DEFAULT_DB` (auto-select on first load), `QUERY_TIMEOUT_MS` (default 60000).
+**Env vars** (loaded from `.env`, see `.env.example` for full list): `HOST` (default `127.0.0.1` — bind address), `PORT` (default 3000), `MSSQL_SERVER`/`MSSQL_USER`/`MSSQL_PASSWORD`, `MSSQL_TRUST_SERVER_CERT` (default `true`), `MSSQL_ENCRYPT` (default `false`), `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASSWORD`, `MSSQL_DEFAULT_DB`/`PG_DEFAULT_DB` (auto-select on first load), `QUERY_TIMEOUT_MS` (default 60000), `SESSION_TTL_MS` (default 8h — how long an idle browser session keeps its pooled connections).
 
 **Backend endpoints** (`/api/{mssql,pg}/...`):
 - `connect`, `disconnect` (pg only) — switch credentials at runtime
@@ -42,6 +42,10 @@ No build step, no test suite — single-file Express app serving a single static
 - Client-side destructive-query confirmation for `DROP`/`TRUNCATE`/unscoped `DELETE`/`UPDATE` (advisory only — bypassable by direct API calls).
 - Hard query timeout (`QUERY_TIMEOUT_MS`, default 60s) on both pools.
 - Audit log written to `logs/audit-YYYY-MM-DD.log` per query.
+- Each browser gets its own connections. Switching server/profile, a read-only
+  profile, and Cancel all affect only the browser that issued them. This is
+  isolation between people sharing one server, **not** authentication — anyone
+  who can reach the API gets a session and the `.env` credentials with it.
 
 **Frontend state (localStorage):** `msProfiles`, `pgProfiles`, `queryHistory:{ms,pg}`, `collapsedSchemas:{ms,pg}`, `sidebarCollapsed:{ms,pg}`, `lastMode`, `theme` (`dark`/`light`/`system`), `lastDb:ms:<server>:<user>` and `lastDb:pg:<host>:<port>:<user>` (per-profile last-selected DB), `sqlSnippets` (query snippet library).
 
