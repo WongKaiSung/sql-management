@@ -4,9 +4,37 @@ const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const dns = require('dns').promises;
 const pkg = require('./package.json');
 
 const WORKSTATION = os.hostname();
+
+// Reverse-DNS for pg_stat_activity client_addr, so the clients panel can name
+// the machine behind an IP. Lookups run in the background and the result is
+// cached — /api/status is polled continuously and must never block on DNS, so a
+// first sighting returns null and the name lands on a later poll. Failures (no
+// PTR record — common for Linux hosts and containers) are cached as null too,
+// otherwise every poll would re-query DNS for them.
+const RDNS_TTL_MS = 30 * 60 * 1000;
+const rdnsCache = new Map();    // ip → { host: string|null, at: epoch ms }
+const rdnsInFlight = new Set();
+
+function rdnsLookup(ip) {
+  const hit = rdnsCache.get(ip);
+  if (hit && Date.now() - hit.at < RDNS_TTL_MS) return hit.host;
+  if (!rdnsInFlight.has(ip)) {
+    rdnsInFlight.add(ip);
+    // lookupService (getnameinfo) not reverse (c-ares): c-ares queries the
+    // configured nameservers in order, and if a public resolver is listed ahead
+    // of the internal one it answers NXDOMAIN for private PTR zones and c-ares
+    // stops there. getnameinfo defers to the OS resolver, which gets it right.
+    dns.lookupService(ip, 0)
+      .then(r => rdnsCache.set(ip, { host: r.hostname || null, at: Date.now() }))
+      .catch(() => rdnsCache.set(ip, { host: null, at: Date.now() }))
+      .finally(() => rdnsInFlight.delete(ip));
+  }
+  return hit ? hit.host : null;   // serve the stale name while it refreshes
+}
 
 // Load .env if present (no dotenv dependency)
 try {
@@ -580,7 +608,7 @@ app.get('/api/status', async (req, res) => {
            'type',     backend_type,
            'state',    state,
            'wait',     coalesce(wait_event_type || '/' || wait_event, null),
-           'addr',     client_addr::text,
+           'addr',     host(client_addr),
            'query',    left(query, 120),
            'duration', extract(epoch from (now() - state_change))::int
          ) ORDER BY state_change DESC) AS rows
@@ -588,6 +616,7 @@ app.get('/api/status', async (req, res) => {
          WHERE pid <> pg_backend_pid()`
       );
       pgClients = { count: r.rows[0].n, rows: r.rows[0].rows || [] };
+      pgClients.rows.forEach(c => { if (c.addr) c.host = rdnsLookup(c.addr); });
     } catch {}
   }
 

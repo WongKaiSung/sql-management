@@ -655,7 +655,9 @@
     color: var(--text-muted);
     font-weight: 600;
     font-size: 11px;
-    text-transform: uppercase;
+    /* Deliberately NOT uppercased: PostgreSQL identifiers created with quotes are
+       case-sensitive, so a header rendered FULLNAME for a FullName column invites
+       WHERE FULLNAME = … — which folds to fullname and errors. Show the real name. */
     letter-spacing: 0.3px;
     z-index: 1;
   }
@@ -834,7 +836,6 @@
     padding: 4px 8px;
     white-space: nowrap;
     font-size: 10px;
-    text-transform: uppercase;
     letter-spacing: 0.3px;
     z-index: 2;
   }
@@ -1918,6 +1919,8 @@ table.result-table th { position: relative; overflow: visible; }
             <button id="cgAll"  class="clients-tab active" onclick="setClientsView('all')">All</button>
             <button id="cgDb"   class="clients-tab"        onclick="setClientsView('db')">Database</button>
             <button id="cgUser" class="clients-tab"        onclick="setClientsView('user')">User</button>
+            <button id="cgIp"   class="clients-tab"        onclick="setClientsView('ip')" title="Group by client_addr — the IP the server sees each client connecting from">IP</button>
+            <button id="cgDbIp" class="clients-tab"        onclick="setClientsView('dbip')" title="Group by database and client IP together — which machine holds connections to which database">DB+IP</button>
             <button id="cgQ"    class="clients-tab"        onclick="setClientsView('query')">Query</button>
           </div>
           <div style="flex:1"></div>
@@ -3867,8 +3870,25 @@ let clientsView = 'all';
 function setClientsView(v) {
   clientsView = v;
   document.querySelectorAll('.clients-tab').forEach(b => b.classList.remove('active'));
-  document.getElementById({ all: 'cgAll', db: 'cgDb', user: 'cgUser', query: 'cgQ' }[v]).classList.add('active');
+  document.getElementById({ all: 'cgAll', db: 'cgDb', user: 'cgUser', ip: 'cgIp', dbip: 'cgDbIp', query: 'cgQ' }[v]).classList.add('active');
   renderClientsTable();
+}
+
+// client_addr is NULL both for unix-socket clients and for server background
+// processes (autovacuum, walwriter…) — keep those apart so a pile of workers
+// doesn't read as a machine with many connections.
+function clientIpKey(r) {
+  return (r.type && r.type !== 'client backend')
+    ? '(server background process)'
+    : (r.addr || 'local (unix socket)');
+}
+
+// Reverse-DNS name for the client machine, rendered under the IP. Empty while
+// the server's background lookup is still in flight, and for hosts with no PTR
+// record (common for Linux app servers and containers).
+function clientHostLine(r) {
+  if (!r.host || (r.type && r.type !== 'client backend')) return '';
+  return `<div style="color:var(--text-muted);font-size:10px;margin-top:1px">${esc(r.host)}</div>`;
 }
 
 function renderClientsTable() {
@@ -3886,6 +3906,16 @@ function renderClientsTable() {
     el.innerHTML = renderGrouped(rows, r => r.db || '(none)', 'Database', 'var(--blue)');
   } else if (clientsView === 'user') {
     el.innerHTML = renderGrouped(rows, r => r.user || '(none)', 'User', 'var(--text)');
+  } else if (clientsView === 'ip') {
+    el.innerHTML = renderGrouped(rows, clientIpKey, 'Client IP · Host', 'var(--text)', false, false,
+      (k, r) => `<div style="font-family:monospace">${esc(k)}</div>` + clientHostLine(r));
+  } else if (clientsView === 'dbip') {
+    el.innerHTML = renderGrouped(rows, r => (r.db || '(none)') + ' · ' + clientIpKey(r),
+      'Database · Client IP · Host', 'var(--text)', false, false,
+      (k, r) => `<div><span style="color:var(--blue);font-weight:500">${esc(r.db || '(none)')}</span>`
+              + `<span style="color:var(--text-muted);margin:0 6px">·</span>`
+              + `<span style="font-family:monospace">${esc(clientIpKey(r))}</span></div>`
+              + clientHostLine(r));
   } else {
     el.innerHTML = renderGrouped(rows,
       r => (r.query || '').trim().replace(/\s+/g, ' ') || '(idle / no query)',
@@ -3912,7 +3942,7 @@ function renderAllClients(rows) {
       ${td(isWorker
         ? `<span style="color:var(--purple)">${esc(r.type)}</span>`
         : `<span style="color:${stateColor(r.state)}">${r.state || ''}</span>${r.wait ? `<span style="color:var(--yellow);margin-left:4px;font-size:10px">(${esc(r.wait)})</span>` : ''}`, '')}
-      ${td(esc(r.addr || 'local'), 'color:var(--text-muted);font-family:monospace')}
+      ${td(`<span title="${esc(r.host || (r.addr ? 'No PTR record' : ''))}">${esc(r.addr || 'local')}</span>`, 'color:var(--text-muted);font-family:monospace')}
       ${td(`<span title="${esc(r.query || '')}" style="display:inline-block;max-width:200px;overflow:hidden;text-overflow:ellipsis;color:var(--text-muted);font-family:monospace;font-size:10px;vertical-align:middle">${esc(r.query || '')}</span>`, '')}
       ${td(fmtAge(r.duration), 'color:var(--text-muted);font-family:monospace')}
 ${td(isWorker ? '' : `<button class="client-kill-btn" aria-label="Terminate PID ${r.pid}" title="Terminate PID ${r.pid}" onclick="killPg([${r.pid}], 'PID ${r.pid}')">✕</button>`, 'text-align:center')}
@@ -3928,12 +3958,14 @@ ${td(isWorker ? '' : `<button class="client-kill-btn" aria-label="Terminate PID 
     </tr></thead><tbody>${trs}</tbody></table>`;
 }
 
-function renderGrouped(rows, keyFn, label, keyColor, monoKey = false, wrapKey = false) {
+// keyHtmlFn(key, sampleRow) optionally renders the key cell as HTML (it must
+// escape its own interpolations); without it the key is escaped and shown as-is.
+function renderGrouped(rows, keyFn, label, keyColor, monoKey = false, wrapKey = false, keyHtmlFn = null) {
   // Aggregate
   const groups = new Map();
   rows.forEach(r => {
     const k = keyFn(r);
-    if (!groups.has(k)) groups.set(k, { total: 0, active: 0, idle: 0, other: 0, pids: [] });
+    if (!groups.has(k)) groups.set(k, { total: 0, active: 0, idle: 0, other: 0, pids: [], sample: r });
     const g = groups.get(k);
     g.total++;
     g.pids.push(r.pid);
@@ -3958,7 +3990,7 @@ function renderGrouped(rows, keyFn, label, keyColor, monoKey = false, wrapKey = 
       ${bar(g.active, g.total, 'var(--green)')}${bar(g.idle, g.total, 'var(--border)')}${bar(g.other, g.total, 'var(--yellow)')}
     </div>`;
     return `<tr>
-      <td style="${keyStyle}" title="${esc(k)}">${esc(k)}</td>
+      <td style="${keyStyle}" title="${esc(k)}">${keyHtmlFn ? keyHtmlFn(k, g.sample) : esc(k)}</td>
       <td style="padding:5px 10px;text-align:center;font-weight:700;font-size:14px">${g.total}</td>
       <td style="padding:5px 10px;color:var(--green)">${g.active || ''}</td>
       <td style="padding:5px 10px;color:var(--text-muted)">${g.idle || ''}</td>
