@@ -597,7 +597,19 @@ async function connPgPool(conn, database) {
   }
   conn.pgPoolSwitch = (async () => {
     if (conn.pgPool) await conn.pgPool.end().catch(() => {});
-    conn.pgPool = new Pool({ ...conn.pgConfig, database });
+    // application_name makes this app's own backends identifiable in
+    // pg_stat_activity (they were previously blank, which is also why
+    // reclaim-pg.js --app, which matches 'sqlconnect%', never matched anything).
+    conn.pgPool = new Pool({ ...conn.pgConfig, database, application_name: 'sqlconnect' });
+    // node-postgres emits 'error' on the POOL when an idle client's backend dies
+    // — precisely what "Kill idle" does to this app's own pooled connections.
+    // An 'error' event with no listener is an unhandled EventEmitter error and
+    // takes the whole process down, so this listener is load-bearing, not
+    // diagnostic: without it the container dies mid-request and the proxy in
+    // front answers with an HTML error page.
+    conn.pgPool.on('error', err => {
+      console.error('[pg pool] idle client error (backend terminated?):', err.message);
+    });
     conn.pgPoolDb = database;
   })();
   try { await conn.pgPoolSwitch; } finally { conn.pgPoolSwitch = null; }
