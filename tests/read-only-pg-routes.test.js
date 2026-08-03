@@ -38,12 +38,24 @@ function waitForExit(child, timeoutMs) {
   });
 }
 
+// Connection state is per browser session, so these requests must carry one
+// session cookie throughout — they stand in for a single person's browser.
+// Without the jar every request would land in a fresh session and the profile
+// set up by /connect would not be the one /query runs against.
+const cookies = new Map();
+
 async function post(baseUrl, route, body) {
+  const jar = [...cookies].map(([name, value]) => `${name}=${value}`).join('; ');
   const response = await fetch(`${baseUrl}${route}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(jar ? { cookie: jar } : {}) },
     body: JSON.stringify(body),
   });
+  for (const raw of response.headers.getSetCookie?.() || []) {
+    const [pair] = raw.split(';');
+    const eq = pair.indexOf('=');
+    if (eq > 0) cookies.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+  }
   const payload = await response.json();
   assert.equal(response.status, 200, `${route}: ${JSON.stringify(payload)}`);
   return payload;

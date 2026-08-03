@@ -4,9 +4,38 @@ const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
+const dns = require('dns').promises;
 const pkg = require('./package.json');
 
 const WORKSTATION = os.hostname();
+
+// Reverse-DNS for pg_stat_activity client_addr, so the clients panel can name
+// the machine behind an IP. Lookups run in the background and the result is
+// cached — /api/status is polled continuously and must never block on DNS, so a
+// first sighting returns null and the name lands on a later poll. Failures (no
+// PTR record — common for Linux hosts and containers) are cached as null too,
+// otherwise every poll would re-query DNS for them.
+const RDNS_TTL_MS = 30 * 60 * 1000;
+const rdnsCache = new Map();    // ip → { host: string|null, at: epoch ms }
+const rdnsInFlight = new Set();
+
+function rdnsLookup(ip) {
+  const hit = rdnsCache.get(ip);
+  if (hit && Date.now() - hit.at < RDNS_TTL_MS) return hit.host;
+  if (!rdnsInFlight.has(ip)) {
+    rdnsInFlight.add(ip);
+    // lookupService (getnameinfo) not reverse (c-ares): c-ares queries the
+    // configured nameservers in order, and if a public resolver is listed ahead
+    // of the internal one it answers NXDOMAIN for private PTR zones and c-ares
+    // stops there. getnameinfo defers to the OS resolver, which gets it right.
+    dns.lookupService(ip, 0)
+      .then(r => rdnsCache.set(ip, { host: r.hostname || null, at: Date.now() }))
+      .catch(() => rdnsCache.set(ip, { host: null, at: Date.now() }))
+      .finally(() => rdnsInFlight.delete(ip));
+  }
+  return hit ? hit.host : null;   // serve the stale name while it refreshes
+}
 
 // Load .env if present (no dotenv dependency)
 try {
@@ -79,6 +108,13 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+// Each browser gets its own connection state — see the "Per-browser sessions"
+// block below for why. Scoped to /api deliberately: the session cookie must only
+// ride on responses the no-store header above forbids anyone from caching. Put
+// it on a cacheable static asset and a shared reverse proxy could store that
+// response and hand one person's session id to everybody behind it.
+app.use('/api', attachSession);
+
 const QUERY_TIMEOUT_MS = parseInt(process.env.QUERY_TIMEOUT_MS) || 60000;
 const AUDIT_LOG_DIR = path.join(__dirname, 'logs');
 const AUDIT_QUERY_MAX = parseInt(process.env.AUDIT_QUERY_MAX) || 4000;
@@ -108,10 +144,6 @@ function clientIp(req) {
   if (fwd) return String(fwd).split(',')[0].trim();
   return (req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
 }
-
-// ── Read-only enforcement (per-side flag) ────────────────────────────────────
-let mssqlReadOnly = false;
-let pgReadOnly = false;
 
 // Splits a SQL batch on top-level `;`. Aware of:
 //   '...' single-quoted strings (with '' escape)
@@ -357,80 +389,199 @@ function violatesReadOnly(query) {
   return null;
 }
 
-// ── MSSQL config (mutable) ───────────────────────────────────────────────────
+// ── Driver options ───────────────────────────────────────────────────────────
 const MSSQL_TRUST_CERT = String(process.env.MSSQL_TRUST_SERVER_CERT ?? 'true').toLowerCase() !== 'false';
 const MSSQL_ENCRYPT = String(process.env.MSSQL_ENCRYPT ?? 'false').toLowerCase() === 'true';
 
-let mssqlConfig = {
-  server: process.env.MSSQL_SERVER || 'localhost',
-  user: process.env.MSSQL_USER || 'sa',
-  password: process.env.MSSQL_PASSWORD || '',
-  options: {
-    trustServerCertificate: MSSQL_TRUST_CERT,
-    encrypt: MSSQL_ENCRYPT,
-  },
-  pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
-  requestTimeout: QUERY_TIMEOUT_MS,
-};
-
-const mssqlPools = new Map();
-
-async function getMssqlPool(database = 'master') {
-  if (!mssqlPools.has(database)) {
-    const pool = await new sql.ConnectionPool({ ...mssqlConfig, database }).connect();
-    mssqlPools.set(database, pool);
-  }
-  return mssqlPools.get(database);
-}
-
-async function resetMssqlPools() {
-  for (const pool of mssqlPools.values()) await pool.close().catch(() => {});
-  mssqlPools.clear();
-}
-
-// ── PostgreSQL config (mutable) ──────────────────────────────────────────────
-let pgConfig = {
-  host: process.env.PG_HOST || 'localhost',
-  port: parseInt(process.env.PG_PORT) || 5432,
-  user: process.env.PG_USER || 'postgres',
-  password: process.env.PG_PASSWORD || '',
-  max: 5,
-  idleTimeoutMillis: 30000,
-  statement_timeout: QUERY_TIMEOUT_MS,
-};
-
-let pgPool = null;
-let pgPoolDb = null;
-let pgPoolSwitch = null;
-
-// Stable snapshot of the .env default connection, captured at startup. The
-// mutable *Config objects get overwritten when the user switches profiles, so
-// we keep the originals here to expose a "Default" profile everyone can see and
-// switch back to — without the client ever needing the password.
+// Stable snapshot of the .env default connection, captured at startup. A
+// session's config gets overwritten when its user switches profiles, so we keep
+// the originals here to expose a "Default" profile everyone can see and switch
+// back to — without the client ever needing the password.
 const DEFAULTS = {
   ms: { server: process.env.MSSQL_SERVER || '', user: process.env.MSSQL_USER || '', password: process.env.MSSQL_PASSWORD || '', db: process.env.MSSQL_DEFAULT_DB || null },
   pg: { host: process.env.PG_HOST || '', port: parseInt(process.env.PG_PORT) || 5432, user: process.env.PG_USER || '', password: process.env.PG_PASSWORD || '', db: process.env.PG_DEFAULT_DB || null },
 };
 
-async function getPgPool(database) {
-  if (pgPool && pgPoolDb === database) return pgPool;
-  // Serialize concurrent switches (e.g. parallel tables/views/procedures
-  // fetches on a DB change) so we don't rebuild — and leak — the pool N times.
-  if (pgPoolSwitch) {
-    await pgPoolSwitch.catch(() => {});
-    if (pgPool && pgPoolDb === database) return pgPool;
-  }
-  pgPoolSwitch = (async () => {
-    if (pgPool) await pgPool.end().catch(() => {});
-    pgPool = new Pool({ ...pgConfig, database });
-    pgPoolDb = database;
-  })();
-  try { await pgPoolSwitch; } finally { pgPoolSwitch = null; }
-  return pgPool;
+function mssqlConfigFor(server, user, password) {
+  return {
+    server, user, password: password || '',
+    options: { trustServerCertificate: MSSQL_TRUST_CERT, encrypt: MSSQL_ENCRYPT },
+    pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
+    requestTimeout: QUERY_TIMEOUT_MS,
+  };
 }
 
-async function pgQuery(database, queryText) {
-  const pool = await getPgPool(database);
+function pgConfigFor(host, port, user, password) {
+  return {
+    host, port: parseInt(port) || 5432, user, password: password || '',
+    max: 5, idleTimeoutMillis: 30000, statement_timeout: QUERY_TIMEOUT_MS,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Per-browser sessions
+//
+// Every live connection — the fixed ms/pg/ms2/pg2 slots and the added panels
+// alike — is a `conn` record owned by one browser session, addressed through
+// `req.conns` (fixed slots) or `req.session.conns` (added panels).
+//
+// This state used to be module-global, which meant the whole server process
+// shared one live connection per slot: the moment anyone switched server or
+// profile, everyone else's panels switched under them, one person's read-only
+// profile silenced another person's writes, and Cancel aborted whoever's query
+// happened to be running. Keying it by a session cookie is what keeps two
+// people out of each other's way.
+//
+// In-memory is enough because the process is single-instance by deployment
+// (iisnode nodeProcessCountPerApplication="1", one Docker container). A restart
+// drops every session; browsers re-establish from their saved profiles on load.
+// ════════════════════════════════════════════════════════════════════════════
+const SESSION_COOKIE = 'sqlmgmt_sid';
+const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS) || 8 * 60 * 60 * 1000;
+const SESSION_SWEEP_MS = 5 * 60 * 1000;
+
+const sessions = new Map();   // sid → session
+
+function makeConn(id, type) {
+  return {
+    id, type,                 // type: 'mssql' | 'pg'
+    readOnly: false,
+    name: '',
+    mssqlConfig: null,
+    mssqlPools: new Map(),
+    mssqlCurrentRequest: null,
+    pgConfig: null,
+    pgPool: null, pgPoolDb: null, pgPoolSwitch: null, pgCurrentPid: null,
+  };
+}
+
+// Slot 1 starts preloaded with the .env default so a fresh browser can query
+// straight away; slot 2 stays blank until its user configures it. This mirrors
+// exactly how the old module-level configs were initialised.
+function makeFixedSlots() {
+  const ms = makeConn('ms', 'mssql');
+  ms.mssqlConfig = mssqlConfigFor(
+    process.env.MSSQL_SERVER || 'localhost',
+    process.env.MSSQL_USER || 'sa',
+    process.env.MSSQL_PASSWORD,
+  );
+  const pg = makeConn('pg', 'pg');
+  pg.pgConfig = pgConfigFor(
+    process.env.PG_HOST || 'localhost',
+    process.env.PG_PORT,
+    process.env.PG_USER || 'postgres',
+    process.env.PG_PASSWORD,
+  );
+  return { ms, pg, ms2: makeConn('ms2', 'mssql'), pg2: makeConn('pg2', 'pg') };
+}
+
+function makeSession(id) {
+  return { id, lastSeen: Date.now(), slots: makeFixedSlots(), conns: new Map() };
+}
+
+function parseCookies(header) {
+  const out = {};
+  String(header || '').split(';').forEach(part => {
+    const eq = part.indexOf('=');
+    if (eq < 0) return;
+    const name = part.slice(0, eq).trim();
+    if (name) out[name] = part.slice(eq + 1).trim();
+  });
+  return out;
+}
+
+function attachSession(req, res, next) {
+  const presented = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  // A well-formed id we no longer know (server restarted, or the sweeper
+  // reclaimed it) is adopted rather than replaced, so a browser keeps one
+  // identity instead of accumulating orphaned cookies.
+  const valid = /^[a-f0-9]{32}$/.test(presented || '') ? presented : null;
+  const sid = valid || crypto.randomUUID().replace(/-/g, '');
+  if (!sessions.has(sid)) sessions.set(sid, makeSession(sid));
+  if (!valid) {
+    const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const secure = req.secure || proto === 'https';
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`);
+  }
+  const session = sessions.get(sid);
+  session.lastSeen = Date.now();
+  req.session = session;
+  req.conns = session.slots;
+  next();
+}
+
+async function closeConn(conn) {
+  for (const pool of conn.mssqlPools.values()) await pool.close().catch(() => {});
+  conn.mssqlPools.clear();
+  if (conn.pgPool) {
+    await conn.pgPool.end().catch(() => {});
+    conn.pgPool = null;
+    conn.pgPoolDb = null;
+  }
+}
+
+async function closeSession(session) {
+  for (const conn of [...Object.values(session.slots), ...session.conns.values()]) {
+    try { await closeConn(conn); } catch {}
+  }
+}
+
+// Reclaim the pools of browsers that stopped calling. An open tab polls
+// /api/status continuously, so only a closed one goes idle long enough to be
+// swept. unref() keeps this timer from holding the process open.
+const sessionSweeper = setInterval(() => {
+  const cutoff = Date.now() - SESSION_TTL_MS;
+  for (const [id, session] of sessions) {
+    if (session.lastSeen > cutoff) continue;
+    sessions.delete(id);
+    closeSession(session).catch(() => {});
+  }
+}, SESSION_SWEEP_MS);
+sessionSweeper.unref?.();
+
+// ── Pool access, always scoped to one conn record ────────────────────────────
+async function connMssqlPool(conn, database = 'master') {
+  if (!conn.mssqlConfig || !conn.mssqlConfig.server) {
+    throw new Error(conn.id === 'ms2'
+      ? 'SQL Server slot 2 not connected. Click ⚙ to configure.'
+      : 'Connection not configured.');
+  }
+  if (!conn.mssqlPools.has(database)) {
+    const pool = await new sql.ConnectionPool({ ...conn.mssqlConfig, database }).connect();
+    conn.mssqlPools.set(database, pool);
+  }
+  return conn.mssqlPools.get(database);
+}
+
+async function connResetMssqlPools(conn) {
+  for (const pool of conn.mssqlPools.values()) await pool.close().catch(() => {});
+  conn.mssqlPools.clear();
+}
+
+async function connPgPool(conn, database) {
+  if (!conn.pgConfig || !conn.pgConfig.host) {
+    throw new Error(conn.id === 'pg2'
+      ? 'PostgreSQL slot 2 not connected. Click ⚙ to configure.'
+      : 'Connection not configured.');
+  }
+  if (conn.pgPool && conn.pgPoolDb === database) return conn.pgPool;
+  // Serialize concurrent switches (e.g. parallel tables/views/procedures
+  // fetches on a DB change) so we don't rebuild — and leak — the pool N times.
+  if (conn.pgPoolSwitch) {
+    await conn.pgPoolSwitch.catch(() => {});
+    if (conn.pgPool && conn.pgPoolDb === database) return conn.pgPool;
+  }
+  conn.pgPoolSwitch = (async () => {
+    if (conn.pgPool) await conn.pgPool.end().catch(() => {});
+    conn.pgPool = new Pool({ ...conn.pgConfig, database });
+    conn.pgPoolDb = database;
+  })();
+  try { await conn.pgPoolSwitch; } finally { conn.pgPoolSwitch = null; }
+  return conn.pgPool;
+}
+
+async function connPgQuery(conn, database, queryText) {
+  const pool = await connPgPool(conn, database);
   return pool.query(queryText);
 }
 
@@ -531,12 +682,12 @@ async function mssqlEstimatedPlan(pool, query) {
 app.post('/api/mssql/connect', async (req, res) => {
   const { server, user, password, readOnly } = req.body;
   if (!server || !user) return res.status(400).json({ error: 'server and user required' });
-  mssqlConfig = { ...mssqlConfig, server, user, ...(password ? { password } : {}) };
-  mssqlReadOnly = !!readOnly;
-  await resetMssqlPools();
+  req.conns.ms.mssqlConfig = mssqlConfigFor(server, user, password || req.conns.ms.mssqlConfig?.password);
+  req.conns.ms.readOnly = !!readOnly;
+  await connResetMssqlPools(req.conns.ms);
   try {
-    await getMssqlPool('master');
-    res.json({ ok: true, server, user, readOnly: mssqlReadOnly });
+    await connMssqlPool(req.conns.ms, 'master');
+    res.json({ ok: true, server, user, readOnly: req.conns.ms.readOnly });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -545,33 +696,33 @@ app.post('/api/mssql/connect', async (req, res) => {
 app.post('/api/pg/connect', async (req, res) => {
   const { host, port, user, password, readOnly } = req.body;
   if (!host || !user) return res.status(400).json({ error: 'host and user required' });
-  pgConfig = { ...pgConfig, host, port: parseInt(port) || 5432, user, ...(password ? { password } : {}) };
-  pgReadOnly = !!readOnly;
-  if (pgPool) { await pgPool.end().catch(() => {}); pgPool = null; pgPoolDb = null; }
+  req.conns.pg.pgConfig = pgConfigFor(host, port, user, password || req.conns.pg.pgConfig?.password);
+  req.conns.pg.readOnly = !!readOnly;
+  if (req.conns.pg.pgPool) { await req.conns.pg.pgPool.end().catch(() => {}); req.conns.pg.pgPool = null; req.conns.pg.pgPoolDb = null; }
   try {
     // Force a real connection so the pool is actually live (and credential/host
     // errors surface here) before the client starts loading databases. new Pool()
     // is lazy, so without this the first /databases query races a cold connect.
-    await pgQuery('postgres', 'SELECT 1');
-    res.json({ ok: true, host: pgConfig.host, port: pgConfig.port, user: pgConfig.user, readOnly: pgReadOnly });
+    await connPgQuery(req.conns.pg, 'postgres', 'SELECT 1');
+    res.json({ ok: true, host: req.conns.pg.pgConfig.host, port: req.conns.pg.pgConfig.port, user: req.conns.pg.pgConfig.user, readOnly: req.conns.pg.readOnly });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
 app.get('/api/status', async (req, res) => {
-  const pgStats = pgPool ? {
-    total: pgPool.totalCount,
-    idle: pgPool.idleCount,
-    waiting: pgPool.waitingCount,
-    database: pgPoolDb,
+  const pgStats = req.conns.pg.pgPool ? {
+    total: req.conns.pg.pgPool.totalCount,
+    idle: req.conns.pg.pgPool.idleCount,
+    waiting: req.conns.pg.pgPool.waitingCount,
+    database: req.conns.pg.pgPoolDb,
   } : null;
 
   // Query pg_stat_activity for the real server-side client count
   let pgClients = null;
-  if (pgPool && pgPoolDb) {
+  if (req.conns.pg.pgPool && req.conns.pg.pgPoolDb) {
     try {
-      const r = await pgPool.query(
+      const r = await req.conns.pg.pgPool.query(
         `SELECT count(*)::int AS n, json_agg(json_build_object(
            'pid',      pid,
            'db',       datname,
@@ -580,7 +731,7 @@ app.get('/api/status', async (req, res) => {
            'type',     backend_type,
            'state',    state,
            'wait',     coalesce(wait_event_type || '/' || wait_event, null),
-           'addr',     client_addr::text,
+           'addr',     host(client_addr),
            'query',    left(query, 120),
            'duration', extract(epoch from (now() - state_change))::int
          ) ORDER BY state_change DESC) AS rows
@@ -588,20 +739,23 @@ app.get('/api/status', async (req, res) => {
          WHERE pid <> pg_backend_pid()`
       );
       pgClients = { count: r.rows[0].n, rows: r.rows[0].rows || [] };
+      pgClients.rows.forEach(c => { if (c.addr) c.host = rdnsLookup(c.addr); });
     } catch {}
   }
 
   const msPools = {};
-  for (const [db, pool] of mssqlPools.entries()) {
+  for (const [db, pool] of req.conns.ms.mssqlPools.entries()) {
     try { msPools[db] = { size: pool.size, available: pool.available }; }
     catch { msPools[db] = {}; }
   }
 
   res.json({
-    pg:  { host: pgConfig.host,  port: pgConfig.port,  user: pgConfig.user,  pool: pgStats, clients: pgClients, readOnly: pgReadOnly, defaultDb: process.env.PG_DEFAULT_DB   || null },
-    ms:  { server: mssqlConfig.server,  user: mssqlConfig.user,  pools: msPools, defaultDb: process.env.MSSQL_DEFAULT_DB || null },
-    pg2: { host: pgConfig2.host, port: pgConfig2.port, user: pgConfig2.user, connected: !!pgConfig2.host },
-    ms2: { server: mssqlConfig2.server, user: mssqlConfig2.user, connected: !!mssqlConfig2.server },
+    pg:  { host: req.conns.pg.pgConfig.host,  port: req.conns.pg.pgConfig.port,  user: req.conns.pg.pgConfig.user,  pool: pgStats, clients: pgClients, readOnly: req.conns.pg.readOnly, defaultDb: process.env.PG_DEFAULT_DB   || null },
+    ms:  { server: req.conns.ms.mssqlConfig.server,  user: req.conns.ms.mssqlConfig.user,  pools: msPools, defaultDb: process.env.MSSQL_DEFAULT_DB || null },
+    // Slot 2 stays unconfigured (config === null) until its user sets it up;
+    // report the same empty-but-present shape the client has always seen.
+    pg2: { host: req.conns.pg2.pgConfig?.host || '', port: req.conns.pg2.pgConfig?.port || 5432, user: req.conns.pg2.pgConfig?.user || '', connected: !!req.conns.pg2.pgConfig?.host },
+    ms2: { server: req.conns.ms2.mssqlConfig?.server || '', user: req.conns.ms2.mssqlConfig?.user || '', connected: !!req.conns.ms2.mssqlConfig?.server },
     // .env default connection — rendered as a non-deletable "Default" profile.
     defaults: {
       ms: { server: DEFAULTS.ms.server, user: DEFAULTS.ms.user, db: DEFAULTS.ms.db, hasPassword: !!DEFAULTS.ms.password },
@@ -614,29 +768,29 @@ app.get('/api/status', async (req, res) => {
 // sent to the client). Powers the "Default" profile button.
 app.post('/api/mssql/connect-default', async (req, res) => {
   if (!DEFAULTS.ms.server || !DEFAULTS.ms.user) return res.status(400).json({ error: 'No default SQL Server configured in .env' });
-  mssqlConfig = { ...mssqlConfig, server: DEFAULTS.ms.server, user: DEFAULTS.ms.user, password: DEFAULTS.ms.password };
-  mssqlReadOnly = false;
-  await resetMssqlPools();
+  req.conns.ms.mssqlConfig = mssqlConfigFor(DEFAULTS.ms.server, DEFAULTS.ms.user, DEFAULTS.ms.password);
+  req.conns.ms.readOnly = false;
+  await connResetMssqlPools(req.conns.ms);
   try {
-    await getMssqlPool('master');
+    await connMssqlPool(req.conns.ms, 'master');
     res.json({ ok: true, server: DEFAULTS.ms.server, user: DEFAULTS.ms.user, readOnly: false });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/pg/connect-default', async (req, res) => {
   if (!DEFAULTS.pg.host || !DEFAULTS.pg.user) return res.status(400).json({ error: 'No default PostgreSQL configured in .env' });
-  pgConfig = { ...pgConfig, host: DEFAULTS.pg.host, port: DEFAULTS.pg.port, user: DEFAULTS.pg.user, password: DEFAULTS.pg.password };
-  pgReadOnly = false;
-  if (pgPool) { await pgPool.end().catch(() => {}); pgPool = null; pgPoolDb = null; }
+  req.conns.pg.pgConfig = pgConfigFor(DEFAULTS.pg.host, DEFAULTS.pg.port, DEFAULTS.pg.user, DEFAULTS.pg.password);
+  req.conns.pg.readOnly = false;
+  if (req.conns.pg.pgPool) { await req.conns.pg.pgPool.end().catch(() => {}); req.conns.pg.pgPool = null; req.conns.pg.pgPoolDb = null; }
   try {
-    await pgQuery('postgres', 'SELECT 1');
+    await connPgQuery(req.conns.pg, 'postgres', 'SELECT 1');
     res.json({ ok: true, host: DEFAULTS.pg.host, port: DEFAULTS.pg.port, user: DEFAULTS.pg.user, readOnly: false });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/pg/disconnect', async (req, res) => {
   try {
-    if (pgPool) { await pgPool.end().catch(() => {}); pgPool = null; pgPoolDb = null; }
+    if (req.conns.pg.pgPool) { await req.conns.pg.pgPool.end().catch(() => {}); req.conns.pg.pgPool = null; req.conns.pg.pgPoolDb = null; }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -647,12 +801,12 @@ app.post('/api/pg/disconnect', async (req, res) => {
 // Always excludes our own backend (pg_backend_pid()). Blocked on read-only profiles.
 app.post('/api/pg/terminate', async (req, res) => {
   const ip = clientIp(req);
-  const auditBase = { side: 'pg', host: pgConfig.host, user: pgConfig.user, readOnly: pgReadOnly, db: pgPoolDb, clientIp: ip };
-  if (pgReadOnly) {
+  const auditBase = { side: 'pg', host: req.conns.pg.pgConfig.host, user: req.conns.pg.pgConfig.user, readOnly: req.conns.pg.readOnly, db: req.conns.pg.pgPoolDb, clientIp: ip };
+  if (req.conns.pg.readOnly) {
     auditLog({ ...auditBase, query: 'pg_terminate_backend', status: 'blocked', error: 'Read-only profile blocked terminate', durationMs: 0 });
     return res.status(403).json({ error: 'Read-only profile — terminating connections is blocked.' });
   }
-  if (!pgPool) return res.status(400).json({ error: 'No active PostgreSQL pool.' });
+  if (!req.conns.pg.pgPool) return res.status(400).json({ error: 'No active PostgreSQL pool.' });
 
   const { pids, scope } = req.body || {};
   try {
@@ -674,7 +828,7 @@ app.post('/api/pg/terminate', async (req, res) => {
     } else {
       return res.status(400).json({ error: 'Provide pids[] or scope ("idle" | "all").' });
     }
-    const r = await pgPool.query(sql, params);
+    const r = await req.conns.pg.pgPool.query(sql, params);
     const killed = r.rows.filter(row => row.terminated).map(row => row.pid);
     auditLog({ ...auditBase, query: `pg_terminate_backend ${scope || 'pids'}`, status: 'ok', terminated: killed.length, pids: killed, durationMs: 0 });
     res.json({ ok: true, terminated: killed.length, pids: killed });
@@ -687,7 +841,7 @@ app.post('/api/pg/terminate', async (req, res) => {
 // ── MSSQL routes ──────────────────────────────────────────────────────────────
 app.get('/api/mssql/databases', async (req, res) => {
   try {
-    const pool = await getMssqlPool('master');
+    const pool = await connMssqlPool(req.conns.ms, 'master');
     const r = await pool.request().query(`
       SELECT name FROM sys.databases
       WHERE state_desc = 'ONLINE' AND name NOT IN ('master','tempdb','model','msdb')
@@ -703,7 +857,7 @@ app.get('/api/mssql/tables', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const pool = await getMssqlPool(db);
+    const pool = await connMssqlPool(req.conns.ms, db);
     const r = await pool.request().query(`
       SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS name
       FROM INFORMATION_SCHEMA.TABLES
@@ -720,7 +874,7 @@ app.get('/api/mssql/views', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const pool = await getMssqlPool(db);
+    const pool = await connMssqlPool(req.conns.ms, db);
     const r = await pool.request().query(`
       SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS name
       FROM INFORMATION_SCHEMA.VIEWS
@@ -736,7 +890,7 @@ app.get('/api/mssql/procedures', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const pool = await getMssqlPool(db);
+    const pool = await connMssqlPool(req.conns.ms, db);
     const r = await pool.request().query(`
       SELECT
         r.ROUTINE_SCHEMA AS [schema],
@@ -773,21 +927,20 @@ app.get('/api/mssql/procedures', async (req, res) => {
 app.get('/api/mssql/pk', async (req, res) => {
   const { db, schema, table } = req.query;
   if (!db || !schema || !table) return res.status(400).json({ error: 'db, schema, table required' });
-  try { res.json({ columns: await mssqlPkColumns(await getMssqlPool(db), schema, table) }); }
+  try { res.json({ columns: await mssqlPkColumns(await connMssqlPool(req.conns.ms, db), schema, table) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-let mssqlCurrentRequest = null;
 
 app.post('/api/mssql/query', async (req, res) => {
   const { query, database } = req.body;
   const ip = clientIp(req);
-  const auditBase = { side: 'ms', host: mssqlConfig.server, user: mssqlConfig.user, readOnly: mssqlReadOnly, db: database, query, clientIp: ip };
+  const auditBase = { side: 'ms', host: req.conns.ms.mssqlConfig.server, user: req.conns.ms.mssqlConfig.user, readOnly: req.conns.ms.readOnly, db: database, query, clientIp: ip };
   if (!database) {
     auditLog({ ...auditBase, status: 'error', error: 'database required', durationMs: 0, statementCount: 0 });
     return res.status(400).json({ error: 'database required' });
   }
-  if (mssqlReadOnly) {
+  if (req.conns.ms.readOnly) {
     const v = violatesReadOnly(query);
     if (v) {
       auditLog({ ...auditBase, status: 'blocked', error: `Read-only blocked ${v}`, durationMs: 0, statementCount: 0 });
@@ -817,9 +970,9 @@ app.post('/api/mssql/query', async (req, res) => {
   const results = [];
   let request;
   try {
-    const pool = await getMssqlPool(database);
+    const pool = await connMssqlPool(req.conns.ms, database);
     request = pool.request();
-    mssqlCurrentRequest = request;
+    req.conns.ms.mssqlCurrentRequest = request;
     // NB: no outer BEGIN TRAN/COMMIT TRAN wrap. The previous wrap was
     // unreliable because pool.request().query() can run each statement on a
     // different physical connection from the pool, so BEGIN/COMMIT didn't
@@ -879,13 +1032,13 @@ app.post('/api/mssql/query', async (req, res) => {
       durationMs: Date.now() - t0,
     });
   } finally {
-    if (mssqlCurrentRequest === request) mssqlCurrentRequest = null;
+    if (req.conns.ms.mssqlCurrentRequest === request) req.conns.ms.mssqlCurrentRequest = null;
   }
 });
 
 app.post('/api/mssql/cancel', (req, res) => {
-  if (!mssqlCurrentRequest) return res.json({ ok: false, reason: 'no active query' });
-  try { mssqlCurrentRequest.cancel(); res.json({ ok: true }); }
+  if (!req.conns.ms.mssqlCurrentRequest) return res.json({ ok: false, reason: 'no active query' });
+  try { req.conns.ms.mssqlCurrentRequest.cancel(); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -894,7 +1047,7 @@ app.post('/api/mssql/explain', async (req, res) => {
   if (!database) return res.status(400).json({ error: 'database required' });
   if (!query || !query.trim()) return res.status(400).json({ error: 'query required' });
   try {
-    const pool = await getMssqlPool(database);
+    const pool = await connMssqlPool(req.conns.ms, database);
     res.json(await mssqlEstimatedPlan(pool, query));
   } catch (e) {
     res.status(200).json({ results: [], error: { statementIndex: 0, message: e.message, code: e.number || null } });
@@ -904,13 +1057,13 @@ app.post('/api/mssql/explain', async (req, res) => {
 // ── PostgreSQL routes ─────────────────────────────────────────────────────────
 app.get('/api/pg/databases', async (req, res) => {
   try {
-    const r = await pgQuery('postgres', `
+    const r = await connPgQuery(req.conns.pg, 'postgres', `
       SELECT datname FROM pg_database
       WHERE datistemplate = false ORDER BY datname
     `);
     res.json(r.rows.map(row => row.datname));
   } catch (e) {
-    console.error(`[pg/databases] ${pgConfig.user}@${pgConfig.host}:${pgConfig.port} →`, e.message);
+    console.error(`[pg/databases] ${req.conns.pg.pgConfig.user}@${req.conns.pg.pgConfig.host}:${req.conns.pg.pgConfig.port} →`, e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -919,7 +1072,7 @@ app.get('/api/pg/tables', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const r = await pgQuery(db, `
+    const r = await connPgQuery(req.conns.pg, db, `
       SELECT table_schema AS schema, table_name AS name
       FROM information_schema.tables
       WHERE table_type = 'BASE TABLE'
@@ -936,7 +1089,7 @@ app.get('/api/pg/views', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const r = await pgQuery(db, `
+    const r = await connPgQuery(req.conns.pg, db, `
       SELECT schemaname AS schema, viewname AS name
       FROM pg_views
       WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
@@ -975,7 +1128,7 @@ app.get('/api/pg/procedures', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const r = await pgQuery(db, `
+    const r = await connPgQuery(req.conns.pg, db, `
       SELECT n.nspname AS schema,
              p.proname AS name,
              p.prokind AS prokind,
@@ -1004,21 +1157,20 @@ app.get('/api/pg/procedures', async (req, res) => {
 app.get('/api/pg/pk', async (req, res) => {
   const { db, schema, table } = req.query;
   if (!db || !schema || !table) return res.status(400).json({ error: 'db, schema, table required' });
-  try { res.json({ columns: await pgPkColumns(getPgPool, db, schema, table) }); }
+  try { res.json({ columns: await pgPkColumns(d => connPgPool(req.conns.pg, d), db, schema, table) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-let pgCurrentPid = null;
 
 app.post('/api/pg/query', async (req, res) => {
   const { query, database } = req.body;
   const ip = clientIp(req);
-  const auditBase = { side: 'pg', host: pgConfig.host, user: pgConfig.user, readOnly: pgReadOnly, db: database, query, clientIp: ip };
+  const auditBase = { side: 'pg', host: req.conns.pg.pgConfig.host, user: req.conns.pg.pgConfig.user, readOnly: req.conns.pg.readOnly, db: database, query, clientIp: ip };
   if (!database) {
     auditLog({ ...auditBase, status: 'error', error: 'database required', durationMs: 0, statementCount: 0 });
     return res.status(400).json({ error: 'database required' });
   }
-  if (pgReadOnly) {
+  if (req.conns.pg.readOnly) {
     const v = violatesReadOnly(query);
     if (v) {
       auditLog({ ...auditBase, status: 'blocked', error: `Read-only blocked ${v}`, durationMs: 0, statementCount: 0 });
@@ -1036,10 +1188,10 @@ app.post('/api/pg/query', async (req, res) => {
   let client;
   let txOpen = false;
   try {
-    const pool = await getPgPool(database);
+    const pool = await connPgPool(req.conns.pg, database);
     client = await pool.connect();
-    pgCurrentPid = client.processID;
-    await client.query(pgReadOnly ? 'BEGIN READ ONLY' : 'BEGIN');
+    req.conns.pg.pgCurrentPid = client.processID;
+    await client.query(req.conns.pg.readOnly ? 'BEGIN READ ONLY' : 'BEGIN');
     txOpen = true;
     for (const stmt of statements) {
       const sT = Date.now();
@@ -1091,16 +1243,16 @@ app.post('/api/pg/query', async (req, res) => {
       durationMs: Date.now() - t0,
     });
   } finally {
-    pgCurrentPid = null;
+    req.conns.pg.pgCurrentPid = null;
     if (client) client.release();
   }
 });
 
 app.post('/api/pg/cancel', async (req, res) => {
-  if (!pgCurrentPid) return res.json({ ok: false, reason: 'no active query' });
-  const pid = parseInt(pgCurrentPid);
+  if (!req.conns.pg.pgCurrentPid) return res.json({ ok: false, reason: 'no active query' });
+  const pid = parseInt(req.conns.pg.pgCurrentPid);
   try {
-    await pgQuery(pgPoolDb || 'postgres', `SELECT pg_cancel_backend(${pid})`);
+    await connPgQuery(req.conns.pg, req.conns.pg.pgPoolDb || 'postgres', `SELECT pg_cancel_backend(${pid})`);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1111,7 +1263,7 @@ app.post('/api/pg/cancel', async (req, res) => {
 app.get('/api/mssql/ping', async (req, res) => {
   const t0 = Date.now();
   try {
-    const pool = await getMssqlPool('master');
+    const pool = await connMssqlPool(req.conns.ms, 'master');
     await pool.request().query('SELECT 1 AS ok');
     res.json({ ok: true, latencyMs: Date.now() - t0 });
   } catch (e) {
@@ -1122,7 +1274,7 @@ app.get('/api/mssql/ping', async (req, res) => {
 app.get('/api/pg/ping', async (req, res) => {
   const t0 = Date.now();
   try {
-    await pgQuery(pgPoolDb || 'postgres', 'SELECT 1 AS ok');
+    await connPgQuery(req.conns.pg, req.conns.pg.pgPoolDb || 'postgres', 'SELECT 1 AS ok');
     res.json({ ok: true, latencyMs: Date.now() - t0 });
   } catch (e) {
     res.status(503).json({ ok: false, error: e.message, latencyMs: Date.now() - t0 });
@@ -1142,7 +1294,7 @@ app.get('/api/mssql/columns', async (req, res) => {
   const { db, schema, table } = req.query;
   if (!db || !table) return res.status(400).json({ error: 'db and table required' });
   try {
-    const pool = await getMssqlPool(db);
+    const pool = await connMssqlPool(req.conns.ms, db);
     const r = await pool.request()
       .input('schema', sql.NVarChar, schema || 'dbo')
       .input('table', sql.NVarChar, table)
@@ -1186,7 +1338,7 @@ app.get('/api/pg/columns', async (req, res) => {
   const { db, schema, table } = req.query;
   if (!db || !table) return res.status(400).json({ error: 'db and table required' });
   try {
-    const r = await pgQuery(db, {
+    const r = await connPgQuery(req.conns.pg, db, {
       text: `SELECT column_name, data_type,
                character_maximum_length, numeric_precision, numeric_scale,
                datetime_precision, is_identity, is_generated, column_default
@@ -1195,7 +1347,7 @@ app.get('/api/pg/columns', async (req, res) => {
              ORDER BY ordinal_position`,
       values: [schema || 'public', table],
     });
-    const pool = await getPgPool(db);
+    const pool = await connPgPool(req.conns.pg, db);
     const fks = await pgFkMap(pool, schema || 'public', table);
     res.json(r.rows.map(row => ({
       name: row.column_name,
@@ -1212,77 +1364,27 @@ app.get('/api/pg/columns', async (req, res) => {
 });
 
 
-// ── MSSQL Slot 2 (independent secondary connection) ──────────────────────────
-let mssqlConfig2 = {
-  server: '', user: '', password: '',
-  options: { trustServerCertificate: MSSQL_TRUST_CERT, encrypt: MSSQL_ENCRYPT },
-  pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
-  requestTimeout: QUERY_TIMEOUT_MS,
-};
-let mssqlReadOnly2 = false;
-const mssqlPools2 = new Map();
-let mssqlCurrentRequest2 = null;
-
-async function getMssqlPool2(database = 'master') {
-  if (!mssqlConfig2.server) throw new Error('SQL Server slot 2 not connected. Click ⚙ to configure.');
-  if (!mssqlPools2.has(database)) {
-    const pool = await new sql.ConnectionPool({ ...mssqlConfig2, database }).connect();
-    mssqlPools2.set(database, pool);
-  }
-  return mssqlPools2.get(database);
-}
-async function resetMssqlPools2() {
-  for (const pool of mssqlPools2.values()) await pool.close().catch(() => {});
-  mssqlPools2.clear();
-}
-
-// ── PG Slot 2 (independent secondary connection) ──────────────────────────────
-let pgConfig2 = {
-  host: '', port: 5432, user: '', password: '',
-  max: 5, idleTimeoutMillis: 30000, statement_timeout: QUERY_TIMEOUT_MS,
-};
-let pgReadOnly2 = false;
-let pgPool2 = null;
-let pgPoolDb2 = null;
-let pgCurrentPid2 = null;
-let pgPoolSwitch2 = null;
-
-async function getPgPool2(database) {
-  if (!pgConfig2.host) throw new Error('PostgreSQL slot 2 not connected. Click ⚙ to configure.');
-  if (pgPool2 && pgPoolDb2 === database) return pgPool2;
-  if (pgPoolSwitch2) {
-    await pgPoolSwitch2.catch(() => {});
-    if (pgPool2 && pgPoolDb2 === database) return pgPool2;
-  }
-  pgPoolSwitch2 = (async () => {
-    if (pgPool2) await pgPool2.end().catch(() => {});
-    pgPool2 = new Pool({ ...pgConfig2, database });
-    pgPoolDb2 = database;
-  })();
-  try { await pgPoolSwitch2; } finally { pgPoolSwitch2 = null; }
-  return pgPool2;
-}
-async function pgQuery2(database, queryText) {
-  const pool = await getPgPool2(database);
-  return pool.query(queryText);
-}
+// ── Slot 2 (independent secondary connection, per session) ───────────────────
+// State lives on req.conns.ms2 / req.conns.pg2; both start unconfigured, so
+// connMssqlPool/connPgPool raise the "not connected, click ⚙" error until the
+// user configures the slot.
 
 // ── MSSQL Slot 2 routes ───────────────────────────────────────────────────────
 app.post('/api/mssql2/connect', async (req, res) => {
   const { server, user, password, readOnly } = req.body;
   if (!server || !user) return res.status(400).json({ error: 'server and user required' });
-  mssqlConfig2 = { ...mssqlConfig2, server, user, ...(password ? { password } : {}) };
-  mssqlReadOnly2 = !!readOnly;
-  await resetMssqlPools2();
+  req.conns.ms2.mssqlConfig = mssqlConfigFor(server, user, password || req.conns.ms2.mssqlConfig?.password);
+  req.conns.ms2.readOnly = !!readOnly;
+  await connResetMssqlPools(req.conns.ms2);
   try {
-    await getMssqlPool2('master');
-    res.json({ ok: true, server, user, readOnly: mssqlReadOnly2 });
+    await connMssqlPool(req.conns.ms2, 'master');
+    res.json({ ok: true, server, user, readOnly: req.conns.ms2.readOnly });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/mssql2/databases', async (req, res) => {
   try {
-    const pool = await getMssqlPool2('master');
+    const pool = await connMssqlPool(req.conns.ms2, 'master');
     const r = await pool.request().query(`
       SELECT name FROM sys.databases
       WHERE state_desc = 'ONLINE' AND name NOT IN ('master','tempdb','model','msdb')
@@ -1296,7 +1398,7 @@ app.get('/api/mssql2/tables', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const pool = await getMssqlPool2(db);
+    const pool = await connMssqlPool(req.conns.ms2, db);
     const r = await pool.request().query(`
       SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS name
       FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'
@@ -1310,7 +1412,7 @@ app.get('/api/mssql2/views', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const pool = await getMssqlPool2(db);
+    const pool = await connMssqlPool(req.conns.ms2, db);
     const r = await pool.request().query(`
       SELECT TABLE_SCHEMA AS [schema], TABLE_NAME AS name
       FROM INFORMATION_SCHEMA.VIEWS ORDER BY TABLE_SCHEMA, TABLE_NAME
@@ -1323,7 +1425,7 @@ app.get('/api/mssql2/procedures', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const pool = await getMssqlPool2(db);
+    const pool = await connMssqlPool(req.conns.ms2, db);
     const r = await pool.request().query(`
       SELECT r.ROUTINE_SCHEMA AS [schema], r.ROUTINE_NAME AS name,
              p.PARAMETER_NAME AS paramName, p.DATA_TYPE AS paramType,
@@ -1347,24 +1449,24 @@ app.get('/api/mssql2/procedures', async (req, res) => {
 app.get('/api/mssql2/pk', async (req, res) => {
   const { db, schema, table } = req.query;
   if (!db || !schema || !table) return res.status(400).json({ error: 'db, schema, table required' });
-  try { res.json({ columns: await mssqlPkColumns(await getMssqlPool2(db), schema, table) }); }
+  try { res.json({ columns: await mssqlPkColumns(await connMssqlPool(req.conns.ms2, db), schema, table) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/mssql2/query', async (req, res) => {
   const { query, database } = req.body;
   const ip = clientIp(req);
-  const auditBase = { side: 'ms2', host: mssqlConfig2.server, user: mssqlConfig2.user, readOnly: mssqlReadOnly2, db: database, query, clientIp: ip };
+  const auditBase = { side: 'ms2', host: req.conns.ms2.mssqlConfig?.server || null, user: req.conns.ms2.mssqlConfig?.user || null, readOnly: req.conns.ms2.readOnly, db: database, query, clientIp: ip };
   if (!database) { auditLog({ ...auditBase, status: 'error', error: 'database required', durationMs: 0, statementCount: 0 }); return res.status(400).json({ error: 'database required' }); }
-  if (mssqlReadOnly2) { const v = violatesReadOnly(query); if (v) { auditLog({ ...auditBase, status: 'blocked', error: `Read-only blocked ${v}`, durationMs: 0, statementCount: 0 }); return res.status(403).json({ error: `Read-only profile blocked ${v} statement.` }); } }
+  if (req.conns.ms2.readOnly) { const v = violatesReadOnly(query); if (v) { auditLog({ ...auditBase, status: 'blocked', error: `Read-only blocked ${v}`, durationMs: 0, statementCount: 0 }); return res.status(403).json({ error: `Read-only profile blocked ${v} statement.` }); } }
   const statements = splitStatements(query);
   if (statements.length === 0) return res.json({ results: [], error: null });
   const PRE  = 'DECLARE @__tc INT = @@TRANCOUNT; SET IMPLICIT_TRANSACTIONS OFF; SET XACT_ABORT ON;\n';
   const POST = '\n;WHILE @@TRANCOUNT > @__tc COMMIT TRAN; WHILE @@TRANCOUNT < @__tc BEGIN TRAN;';
   const t0 = Date.now(); const results = []; let request;
   try {
-    const pool = await getMssqlPool2(database);
-    request = pool.request(); mssqlCurrentRequest2 = request;
+    const pool = await connMssqlPool(req.conns.ms2, database);
+    request = pool.request(); req.conns.ms2.mssqlCurrentRequest = request;
     for (const stmt of statements) {
       const sT = Date.now();
       const r = await request.query(PRE + stmt + POST);
@@ -1380,7 +1482,7 @@ app.post('/api/mssql2/query', async (req, res) => {
     const errPayload = { statementIndex: results.length, message: cancelled ? 'Query cancelled' : e.message, code: e.code || e.number || null, lineNumber: e.lineNumber || e.originalError?.info?.lineNumber || null };
     cancelled ? res.status(499).json({ results, error: errPayload }) : res.status(200).json({ results, error: errPayload });
     auditLog({ ...auditBase, status: cancelled ? 'cancelled' : 'error', error: e.message, code: e.code || e.number || null, statementCount: statements.length, failedAt: results.length, durationMs: Date.now() - t0 });
-  } finally { if (mssqlCurrentRequest2 === request) mssqlCurrentRequest2 = null; }
+  } finally { if (req.conns.ms2.mssqlCurrentRequest === request) req.conns.ms2.mssqlCurrentRequest = null; }
 });
 
 app.post('/api/mssql2/explain', async (req, res) => {
@@ -1388,7 +1490,7 @@ app.post('/api/mssql2/explain', async (req, res) => {
   if (!database) return res.status(400).json({ error: 'database required' });
   if (!query || !query.trim()) return res.status(400).json({ error: 'query required' });
   try {
-    const pool = await getMssqlPool2(database);
+    const pool = await connMssqlPool(req.conns.ms2, database);
     res.json(await mssqlEstimatedPlan(pool, query));
   } catch (e) {
     res.status(200).json({ results: [], error: { statementIndex: 0, message: e.message, code: e.number || null } });
@@ -1396,14 +1498,14 @@ app.post('/api/mssql2/explain', async (req, res) => {
 });
 
 app.post('/api/mssql2/cancel', (req, res) => {
-  if (!mssqlCurrentRequest2) return res.json({ ok: false, reason: 'no active query' });
-  try { mssqlCurrentRequest2.cancel(); res.json({ ok: true }); }
+  if (!req.conns.ms2.mssqlCurrentRequest) return res.json({ ok: false, reason: 'no active query' });
+  try { req.conns.ms2.mssqlCurrentRequest.cancel(); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/mssql2/ping', async (req, res) => {
   const t0 = Date.now();
-  try { const pool = await getMssqlPool2('master'); await pool.request().query('SELECT 1 AS ok'); res.json({ ok: true, latencyMs: Date.now() - t0 }); }
+  try { const pool = await connMssqlPool(req.conns.ms2, 'master'); await pool.request().query('SELECT 1 AS ok'); res.json({ ok: true, latencyMs: Date.now() - t0 }); }
   catch (e) { res.status(503).json({ ok: false, error: e.message, latencyMs: Date.now() - t0 }); }
 });
 
@@ -1411,7 +1513,7 @@ app.get('/api/mssql2/columns', async (req, res) => {
   const { db, schema, table } = req.query;
   if (!db || !table) return res.status(400).json({ error: 'db and table required' });
   try {
-    const pool = await getMssqlPool2(db);
+    const pool = await connMssqlPool(req.conns.ms2, db);
     const r = await pool.request().input('schema', sql.NVarChar, schema || 'dbo').input('table', sql.NVarChar, table)
       .query(`SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE,
                 COLUMNPROPERTY(OBJECT_ID(QUOTENAME(TABLE_SCHEMA) + '.' + QUOTENAME(TABLE_NAME)), COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY,
@@ -1425,34 +1527,34 @@ app.get('/api/mssql2/columns', async (req, res) => {
 app.post('/api/pg2/connect', async (req, res) => {
   const { host, port, user, password, readOnly } = req.body;
   if (!host || !user) return res.status(400).json({ error: 'host and user required' });
-  pgConfig2 = { ...pgConfig2, host, port: parseInt(port) || 5432, user, ...(password ? { password } : {}) };
-  pgReadOnly2 = !!readOnly;
-  if (pgPool2) { await pgPool2.end().catch(() => {}); pgPool2 = null; pgPoolDb2 = null; }
-  try { await pgQuery2('postgres', 'SELECT 1'); res.json({ ok: true, host: pgConfig2.host, port: pgConfig2.port, user: pgConfig2.user, readOnly: pgReadOnly2 }); }
+  req.conns.pg2.pgConfig = pgConfigFor(host, port, user, password || req.conns.pg2.pgConfig?.password);
+  req.conns.pg2.readOnly = !!readOnly;
+  if (req.conns.pg2.pgPool) { await req.conns.pg2.pgPool.end().catch(() => {}); req.conns.pg2.pgPool = null; req.conns.pg2.pgPoolDb = null; }
+  try { await connPgQuery(req.conns.pg2, 'postgres', 'SELECT 1'); res.json({ ok: true, host: req.conns.pg2.pgConfig.host, port: req.conns.pg2.pgConfig.port, user: req.conns.pg2.pgConfig.user, readOnly: req.conns.pg2.readOnly }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/pg2/disconnect', async (req, res) => {
-  try { if (pgPool2) { await pgPool2.end().catch(() => {}); pgPool2 = null; pgPoolDb2 = null; } res.json({ ok: true }); }
+  try { if (req.conns.pg2.pgPool) { await req.conns.pg2.pgPool.end().catch(() => {}); req.conns.pg2.pgPool = null; req.conns.pg2.pgPoolDb = null; } res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/pg2/databases', async (req, res) => {
-  try { const r = await pgQuery2('postgres', 'SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname'); res.json(r.rows.map(row => row.datname)); }
+  try { const r = await connPgQuery(req.conns.pg2, 'postgres', 'SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname'); res.json(r.rows.map(row => row.datname)); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/pg2/tables', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
-  try { const r = await pgQuery2(db, `SELECT table_schema AS schema, table_name AS name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name`); res.json(r.rows); }
+  try { const r = await connPgQuery(req.conns.pg2, db, `SELECT table_schema AS schema, table_name AS name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name`); res.json(r.rows); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/pg2/views', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
-  try { const r = await pgQuery2(db, `SELECT schemaname AS schema, viewname AS name FROM pg_views WHERE schemaname NOT IN ('pg_catalog', 'information_schema') ORDER BY schemaname, viewname`); res.json(r.rows); }
+  try { const r = await connPgQuery(req.conns.pg2, db, `SELECT schemaname AS schema, viewname AS name FROM pg_views WHERE schemaname NOT IN ('pg_catalog', 'information_schema') ORDER BY schemaname, viewname`); res.json(r.rows); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1460,7 +1562,7 @@ app.get('/api/pg2/procedures', async (req, res) => {
   const { db } = req.query;
   if (!db) return res.status(400).json({ error: 'db param required' });
   try {
-    const r = await pgQuery2(db, `SELECT n.nspname AS schema, p.proname AS name, p.prokind AS prokind, pg_get_function_arguments(p.oid) AS args FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.prokind IN ('f', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY n.nspname, p.proname`);
+    const r = await connPgQuery(req.conns.pg2, db, `SELECT n.nspname AS schema, p.proname AS name, p.prokind AS prokind, pg_get_function_arguments(p.oid) AS args FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.prokind IN ('f', 'p') AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY n.nspname, p.proname`);
     res.json(r.rows.map(row => { let params = []; try { params = parsePgFunctionArgs(row.args); } catch {} return { schema: row.schema, name: row.name, kind: row.prokind === 'p' ? 'PROCEDURE' : 'FUNCTION', params }; }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1468,23 +1570,23 @@ app.get('/api/pg2/procedures', async (req, res) => {
 app.get('/api/pg2/pk', async (req, res) => {
   const { db, schema, table } = req.query;
   if (!db || !schema || !table) return res.status(400).json({ error: 'db, schema, table required' });
-  try { res.json({ columns: await pgPkColumns(getPgPool2, db, schema, table) }); }
+  try { res.json({ columns: await pgPkColumns(d => connPgPool(req.conns.pg2, d), db, schema, table) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/pg2/query', async (req, res) => {
   const { query, database } = req.body;
   const ip = clientIp(req);
-  const auditBase = { side: 'pg2', host: pgConfig2.host, user: pgConfig2.user, readOnly: pgReadOnly2, db: database, query, clientIp: ip };
+  const auditBase = { side: 'pg2', host: req.conns.pg2.pgConfig?.host || null, user: req.conns.pg2.pgConfig?.user || null, readOnly: req.conns.pg2.readOnly, db: database, query, clientIp: ip };
   if (!database) { auditLog({ ...auditBase, status: 'error', error: 'database required', durationMs: 0, statementCount: 0 }); return res.status(400).json({ error: 'database required' }); }
-  if (pgReadOnly2) { const v = violatesReadOnly(query); if (v) { auditLog({ ...auditBase, status: 'blocked', error: `Read-only blocked ${v}`, durationMs: 0, statementCount: 0 }); return res.status(403).json({ error: `Read-only profile blocked ${v} statement.` }); } }
+  if (req.conns.pg2.readOnly) { const v = violatesReadOnly(query); if (v) { auditLog({ ...auditBase, status: 'blocked', error: `Read-only blocked ${v}`, durationMs: 0, statementCount: 0 }); return res.status(403).json({ error: `Read-only profile blocked ${v} statement.` }); } }
   const statements = splitStatements(query);
   if (statements.length === 0) return res.json({ results: [], error: null });
   const t0 = Date.now(); const results = []; let client; let txOpen = false;
   try {
-    const pool = await getPgPool2(database);
-    client = await pool.connect(); pgCurrentPid2 = client.processID;
-    await client.query(pgReadOnly2 ? 'BEGIN READ ONLY' : 'BEGIN'); txOpen = true;
+    const pool = await connPgPool(req.conns.pg2, database);
+    client = await pool.connect(); req.conns.pg2.pgCurrentPid = client.processID;
+    await client.query(req.conns.pg2.readOnly ? 'BEGIN READ ONLY' : 'BEGIN'); txOpen = true;
     for (const stmt of statements) {
       const sT = Date.now(); const r = await client.query(stmt);
       const columns = r.fields ? r.fields.map(f => f.name) : [];
@@ -1499,19 +1601,19 @@ app.post('/api/pg2/query', async (req, res) => {
     const errPayload = { statementIndex: results.length, message: cancelled ? 'Query cancelled' : e.message, code: e.code || null, position: e.position ? parseInt(e.position) : null, hint: e.hint || null };
     cancelled ? res.status(499).json({ results, error: errPayload }) : res.status(200).json({ results, error: errPayload });
     auditLog({ ...auditBase, status: cancelled ? 'cancelled' : 'error', error: e.message, code: e.code || null, statementCount: statements.length, failedAt: results.length, durationMs: Date.now() - t0 });
-  } finally { pgCurrentPid2 = null; if (client) client.release(); }
+  } finally { req.conns.pg2.pgCurrentPid = null; if (client) client.release(); }
 });
 
 app.post('/api/pg2/cancel', async (req, res) => {
-  if (!pgCurrentPid2) return res.json({ ok: false, reason: 'no active query' });
-  const pid = parseInt(pgCurrentPid2);
-  try { await pgQuery2(pgPoolDb2 || 'postgres', `SELECT pg_cancel_backend(${pid})`); res.json({ ok: true }); }
+  if (!req.conns.pg2.pgCurrentPid) return res.json({ ok: false, reason: 'no active query' });
+  const pid = parseInt(req.conns.pg2.pgCurrentPid);
+  try { await connPgQuery(req.conns.pg2, req.conns.pg2.pgPoolDb || 'postgres', `SELECT pg_cancel_backend(${pid})`); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/pg2/ping', async (req, res) => {
   const t0 = Date.now();
-  try { await pgQuery2(pgPoolDb2 || 'postgres', 'SELECT 1 AS ok'); res.json({ ok: true, latencyMs: Date.now() - t0 }); }
+  try { await connPgQuery(req.conns.pg2, req.conns.pg2.pgPoolDb || 'postgres', 'SELECT 1 AS ok'); res.json({ ok: true, latencyMs: Date.now() - t0 }); }
   catch (e) { res.status(503).json({ ok: false, error: e.message, latencyMs: Date.now() - t0 }); }
 });
 
@@ -1519,7 +1621,7 @@ app.get('/api/pg2/columns', async (req, res) => {
   const { db, schema, table } = req.query;
   if (!db || !table) return res.status(400).json({ error: 'db and table required' });
   try {
-    const r = await pgQuery2(db, { text: `SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision, is_identity, is_generated, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`, values: [schema || 'public', table] });
+    const r = await connPgQuery(req.conns.pg2, db, { text: `SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision, is_identity, is_generated, column_default FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`, values: [schema || 'public', table] });
     res.json(r.rows.map(row => ({ name: row.column_name, type: formatPgType(row.data_type, row.character_maximum_length, row.numeric_precision, row.numeric_scale, row.datetime_precision), identity: row.is_identity === 'YES' || row.is_generated === 'ALWAYS' || /^nextval\(/i.test(row.column_default || '') })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1528,19 +1630,19 @@ app.get('/api/pg2/columns', async (req, res) => {
 // "Default" button works when a panel is backed by the secondary slot.
 app.post('/api/mssql2/connect-default', async (req, res) => {
   if (!DEFAULTS.ms.server || !DEFAULTS.ms.user) return res.status(400).json({ error: 'No default SQL Server configured in .env' });
-  mssqlConfig2 = { ...mssqlConfig2, server: DEFAULTS.ms.server, user: DEFAULTS.ms.user, password: DEFAULTS.ms.password };
-  mssqlReadOnly2 = false;
-  await resetMssqlPools2();
-  try { await getMssqlPool2('master'); res.json({ ok: true, server: DEFAULTS.ms.server, user: DEFAULTS.ms.user, readOnly: false }); }
+  req.conns.ms2.mssqlConfig = mssqlConfigFor(DEFAULTS.ms.server, DEFAULTS.ms.user, DEFAULTS.ms.password);
+  req.conns.ms2.readOnly = false;
+  await connResetMssqlPools(req.conns.ms2);
+  try { await connMssqlPool(req.conns.ms2, 'master'); res.json({ ok: true, server: DEFAULTS.ms.server, user: DEFAULTS.ms.user, readOnly: false }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/pg2/connect-default', async (req, res) => {
   if (!DEFAULTS.pg.host || !DEFAULTS.pg.user) return res.status(400).json({ error: 'No default PostgreSQL configured in .env' });
-  pgConfig2 = { ...pgConfig2, host: DEFAULTS.pg.host, port: DEFAULTS.pg.port, user: DEFAULTS.pg.user, password: DEFAULTS.pg.password };
-  pgReadOnly2 = false;
-  if (pgPool2) { await pgPool2.end().catch(() => {}); pgPool2 = null; pgPoolDb2 = null; }
-  try { await pgQuery2('postgres', 'SELECT 1'); res.json({ ok: true, host: DEFAULTS.pg.host, port: DEFAULTS.pg.port, user: DEFAULTS.pg.user, readOnly: false }); }
+  req.conns.pg2.pgConfig = pgConfigFor(DEFAULTS.pg.host, DEFAULTS.pg.port, DEFAULTS.pg.user, DEFAULTS.pg.password);
+  req.conns.pg2.readOnly = false;
+  if (req.conns.pg2.pgPool) { await req.conns.pg2.pgPool.end().catch(() => {}); req.conns.pg2.pgPool = null; req.conns.pg2.pgPoolDb = null; }
+  try { await connPgQuery(req.conns.pg2, 'postgres', 'SELECT 1'); res.json({ ok: true, host: DEFAULTS.pg.host, port: DEFAULTS.pg.port, user: DEFAULTS.pg.user, readOnly: false }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1548,65 +1650,25 @@ app.get('/api/version', (req, res) => res.json({ version: pkg.version, build: '2
 
 // ════════════════════════════════════════════════════════════════════════════
 // Generic connection registry — UNLIMITED live connections, keyed by an opaque
-// id. Each conn owns its own pool(s). Routes live under /api/conn/:id/...
+// id within the calling browser's session. Each conn owns its own pool(s).
+// Routes live under /api/conn/:id/...
+//
+// The ids are session-scoped, not global: two browsers both number their first
+// added panel "c1", and each must get its own connection rather than the other
+// person's. Session scoping is also what reclaims these when a browser goes
+// away — a global map grew an orphan entry on every page reload.
+//
 // The legacy /api/{mssql,pg,mssql2,pg2}/... routes above are kept for
 // back-compat but the dynamic-panel frontend uses only this generic layer.
 // ════════════════════════════════════════════════════════════════════════════
-const connections = new Map();
-
-function makeConn(id, type) {
-  return {
-    id, type,                 // type: 'mssql' | 'pg'
-    readOnly: false,
-    name: '',
-    mssqlConfig: null,
-    mssqlPools: new Map(),
-    mssqlCurrentRequest: null,
-    pgConfig: null,
-    pgPool: null, pgPoolDb: null, pgPoolSwitch: null, pgCurrentPid: null,
-  };
-}
-
 function getConnOr404(req, res) {
-  const conn = connections.get(req.params.id);
+  const conn = req.session.conns.get(req.params.id);
   if (!conn) { res.status(404).json({ error: `Unknown connection '${req.params.id}'. Connect first.` }); return null; }
   return conn;
 }
 
-async function connMssqlPool(conn, database = 'master') {
-  if (!conn.mssqlConfig) throw new Error('Connection not configured.');
-  if (!conn.mssqlPools.has(database)) {
-    const pool = await new sql.ConnectionPool({ ...conn.mssqlConfig, database }).connect();
-    conn.mssqlPools.set(database, pool);
-  }
-  return conn.mssqlPools.get(database);
-}
-async function connResetMssqlPools(conn) {
-  for (const pool of conn.mssqlPools.values()) await pool.close().catch(() => {});
-  conn.mssqlPools.clear();
-}
-async function connPgPool(conn, database) {
-  if (!conn.pgConfig) throw new Error('Connection not configured.');
-  if (conn.pgPool && conn.pgPoolDb === database) return conn.pgPool;
-  if (conn.pgPoolSwitch) {
-    await conn.pgPoolSwitch.catch(() => {});
-    if (conn.pgPool && conn.pgPoolDb === database) return conn.pgPool;
-  }
-  conn.pgPoolSwitch = (async () => {
-    if (conn.pgPool) await conn.pgPool.end().catch(() => {});
-    conn.pgPool = new Pool({ ...conn.pgConfig, database });
-    conn.pgPoolDb = database;
-  })();
-  try { await conn.pgPoolSwitch; } finally { conn.pgPoolSwitch = null; }
-  return conn.pgPool;
-}
-async function connPgQuery(conn, database, queryText) {
-  const pool = await connPgPool(conn, database);
-  return pool.query(queryText);
-}
-
 app.get('/api/conn/list', (req, res) => {
-  res.json([...connections.values()].map(c => ({
+  res.json([...req.session.conns.values()].map(c => ({
     id: c.id, type: c.type, name: c.name, readOnly: c.readOnly,
     server: c.mssqlConfig?.server || null,
     host: c.pgConfig?.host || null, port: c.pgConfig?.port || null,
@@ -1618,13 +1680,13 @@ app.get('/api/conn/list', (req, res) => {
 app.post('/api/conn/:id/connect', async (req, res) => {
   const id = req.params.id;
   const { type, name, readOnly, server, user, password, host, port } = req.body;
-  let conn = connections.get(id);
+  let conn = req.session.conns.get(id);
   const effType = type || conn?.type;
   if (!effType) return res.status(400).json({ error: 'type (mssql|pg) required' });
   if (!conn || conn.type !== effType) conn = makeConn(id, effType);
   conn.readOnly = !!readOnly;
   if (name != null) conn.name = name;
-  connections.set(id, conn);
+  req.session.conns.set(id, conn);
   try {
     if (conn.type === 'mssql') {
       if (!server || !user) return res.status(400).json({ error: 'server and user required' });
@@ -1654,12 +1716,12 @@ app.post('/api/conn/:id/connect', async (req, res) => {
 });
 
 app.post('/api/conn/:id/disconnect', async (req, res) => {
-  const conn = connections.get(req.params.id);
+  const conn = req.session.conns.get(req.params.id);
   if (!conn) return res.json({ ok: true });
   try {
     await connResetMssqlPools(conn);
     if (conn.pgPool) { await conn.pgPool.end().catch(() => {}); conn.pgPool = null; conn.pgPoolDb = null; }
-    connections.delete(req.params.id);
+    req.session.conns.delete(req.params.id);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1897,11 +1959,10 @@ const server = isNaN(parseInt(PORT))
 async function shutdown(signal) {
   console.log(`\n  Received ${signal}, shutting down…`);
   server.close();
-  try { await resetMssqlPools(); } catch {}
-  try { if (pgPool) await pgPool.end(); } catch {}
-  for (const conn of connections.values()) {
-    try { await connResetMssqlPools(conn); } catch {}
-    try { if (conn.pgPool) await conn.pgPool.end(); } catch {}
+  clearInterval(sessionSweeper);
+  // Every browser's pools, not just one shared set.
+  for (const session of sessions.values()) {
+    try { await closeSession(session); } catch {}
   }
   process.exit(0);
 }
