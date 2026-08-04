@@ -21,7 +21,7 @@ importers:
         specifier: ^11.0.1
         version: 11.0.1
       pg:
-        specifier: ^8.11.3
+        specifier: ^8.22.0
         version: 8.22.0
       sql-formatter:
         specifier: 15.4.10
