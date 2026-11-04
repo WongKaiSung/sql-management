@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test tests/ui-structure.test.js tests/ux-helpers.test.js tests/server-smoke.test.js tests/read-only-classifier.test.js tests/read-only-pg-routes.test.js",
+    "test": "node --test tests/ui-structure.test.js tests/ux-helpers.test.js tests/server-smoke.test.js tests/read-only-classifier.test.js tests/read-only-pg-routes.test.js tests/toast-behavior.test.js",
     "check": "node --check server.js && node --check public/ux-helpers.js"
   },
   "keywords": [

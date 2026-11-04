@@ -905,7 +905,6 @@
   .mode-btn:not(:first-child) { border-left: 1px solid var(--border); }
   .mode-btn:hover { background: var(--border); color: var(--text); }
   #modeMsBtn.active { background: var(--ms-accent); color: #fff; }
-  #modeBothBtn.active { background: var(--blue-dim); color: var(--blue); font-weight: 600; }
   #modePgBtn.active { background: var(--pg-accent); color: #fff; }
 
   .app-menu-wrap { position: relative; }
@@ -1778,14 +1777,14 @@ table.result-table th { position: relative; overflow: visible; }
   <h1>SQL Management</h1>
   <span class="subtitle">SQL Management</span>
   <span class="subtitle" id="appVersion" title="Deployed version" style="opacity:.55"></span>
-  <div class="mode-selector" role="group" aria-label="Workspace view">
-    <button class="mode-btn" id="modeMsBtn" onclick="setMode('ms')" aria-pressed="false">SQL Server</button>
-    <button class="mode-btn active" id="modeBothBtn" onclick="setMode('both')" aria-pressed="true">Workspace</button>
+  <div class="mode-selector" role="group" aria-label="Connection view">
+    <button class="mode-btn active" id="modeMsBtn" onclick="setMode('ms')" aria-pressed="true">SQL Server</button>
     <button class="mode-btn" id="modePgBtn" onclick="setMode('pg')" aria-pressed="false">PostgreSQL</button>
-    <button class="mode-btn" id="addPanelBtn" onclick="addPanel('ms')" title="Add another live connection panel (SQL Server or PostgreSQL)">＋ Pane</button>
   </div>
   <div class="spacer"></div>
-  <button class="btn btn-secondary btn-sm" id="workspaceRunBtn" onclick="executeVisible()" title="Run queries in visible panes">⚡ Run visible</button>
+  <!-- Lives in the header, not the PostgreSQL pane, so the online-client count
+       stays visible in every view. Clicking it opens pg_stat_activity. -->
+  <span class="pool-status" id="headerPgClients" onclick="toggleClientsPanel()" title="PostgreSQL clients — click to view" style="cursor:pointer;margin-right:8px"></span>
   <div class="app-menu-wrap">
     <button class="btn btn-secondary btn-sm" id="appToolsBtn" type="button" aria-haspopup="menu" aria-controls="appToolsMenu" aria-expanded="false" onclick="toggleAppMenu('appToolsMenu', this)">Tools</button>
     <div class="app-menu" id="appToolsMenu" role="menu" hidden>
@@ -1798,8 +1797,6 @@ table.result-table th { position: relative; overflow: visible; }
       <button type="button" role="menuitem" onclick="restoreWorkspaceBackup()">Restore pre-import backup</button>
       <span class="app-menu-note">Passwords are excluded.</span>
       <button type="button" role="menuitem" onclick="openShortcutsHelp()">Keyboard shortcuts</button>
-      <button type="button" role="menuitem" id="syncScrollBtn" onclick="toggleSyncScroll()">Sync scroll: OFF</button>
-      <button type="button" role="menuitem" id="swapPanelsBtn" onclick="swapPanels()">Swap panes</button>
       <button type="button" role="menuitem" id="themeToggleBtn" onclick="cycleTheme()">Theme</button>
     </div>
     <input id="workspaceImportInput" type="file" accept="application/json,.json" hidden onchange="previewWorkspaceImport(this.files[0])">
@@ -1807,15 +1804,29 @@ table.result-table th { position: relative; overflow: visible; }
 </header>
 
 <!-- ── Main ───────────────────────────────────────────────── -->
-<main id="appMain" class="main" style="flex-direction:column;">
-  <div class="workspace-bar" id="workspaceBar" hidden>
-    <span class="workspace-bar-title">Workspace</span>
-    <span class="workspace-pane-count" id="workspacePaneCount" aria-live="polite">2 panes</span>
-    <span class="workspace-rail-hint" id="workspaceRailHint">Scroll horizontally to move between panes</span>
-    <span class="workspace-bar-spacer"></span>
-    <span class="workspace-active-pane" id="workspaceActivePane">Active: SQL Server</span>
-    <button class="btn btn-secondary btn-sm workspace-close-extras" id="closeExtraPanesBtn" type="button" onclick="closeExtraPanels()" disabled>Close extras</button>
-  </div>
+<main id="appMain" class="main" style="flex-direction:column;position:relative;">
+      <div id="clientsPanel" class="clients-panel">
+        <div class="clients-panel-header">
+          <span style="font-weight:600;font-size:12px">pg_stat_activity</span>
+          <div style="display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden;margin-left:6px">
+            <button id="cgAll"  class="clients-tab active" onclick="setClientsView('all')">All</button>
+            <button id="cgDb"   class="clients-tab"        onclick="setClientsView('db')">Database</button>
+            <button id="cgUser" class="clients-tab"        onclick="setClientsView('user')">User</button>
+            <button id="cgIp"   class="clients-tab"        onclick="setClientsView('ip')" title="Group by client_addr — the IP the server sees each client connecting from">IP</button>
+            <button id="cgDbIp" class="clients-tab"        onclick="setClientsView('dbip')" title="Group by database and client IP together — which machine holds connections to which database">DB+IP</button>
+            <button id="cgQ"    class="clients-tab"        onclick="setClientsView('query')">Query</button>
+          </div>
+          <div style="flex:1"></div>
+          <button class="btn btn-secondary btn-sm" id="killIdleBtn" onclick="killIdlePg()" title="Terminate all idle server connections">☠ Kill idle</button>
+          <button class="btn btn-danger btn-sm" id="killAllBtn" onclick="killAllPg()" title="Terminate ALL server connections except this one">☠ Kill all</button>
+          <button class="btn btn-danger btn-sm" onclick="disconnectPg()" title="Release this app's local pool">⏏ Disconnect</button>
+          <button class="btn btn-secondary btn-sm" id="clientsExpandBtn" aria-label="Expand connected clients" onclick="toggleClientsExpand()" title="Expand">⤢</button>
+          <button class="btn btn-secondary btn-sm" aria-label="Close connected clients" onclick="toggleClientsPanel()">✕</button>
+        </div>
+        <div id="clientsTable" class="clients-panel-body"></div>
+      </div>
+      <div id="clientsOverlay" class="clients-overlay" onclick="toggleClientsExpand()"></div>
+
   <div class="panels" id="panels">
 
     <!-- ══ SQL Server Panel ══ -->
@@ -1889,7 +1900,7 @@ table.result-table th { position: relative; overflow: visible; }
               <span class="exec-time" id="msExecTime"></span>
               <div class="find-in-results">
                 <div class="find-wrap">
-                  <input type="text" id="msFindInput" placeholder="🔍 find in results…" oninput="applyGlobalFilter('ms',this.value)" title="Search across all columns">
+                  <input type="text" id="msFindInput" placeholder="🔍 find in results…" oninput="scheduleGlobalFilter('ms',this.value)" title="Search across all columns">
                   <button class="find-clear" type="button" aria-label="Clear result filter" onclick="clearGlobalFilter('ms')" title="Clear">×</button>
                 </div>
               </div>
@@ -1912,27 +1923,6 @@ table.result-table th { position: relative; overflow: visible; }
 
     <!-- ══ PostgreSQL Panel ══ -->
     <div class="panel" id="pgPanel" style="position:relative">
-      <div id="clientsPanel" class="clients-panel">
-        <div class="clients-panel-header">
-          <span style="font-weight:600;font-size:12px">pg_stat_activity</span>
-          <div style="display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden;margin-left:6px">
-            <button id="cgAll"  class="clients-tab active" onclick="setClientsView('all')">All</button>
-            <button id="cgDb"   class="clients-tab"        onclick="setClientsView('db')">Database</button>
-            <button id="cgUser" class="clients-tab"        onclick="setClientsView('user')">User</button>
-            <button id="cgIp"   class="clients-tab"        onclick="setClientsView('ip')" title="Group by client_addr — the IP the server sees each client connecting from">IP</button>
-            <button id="cgDbIp" class="clients-tab"        onclick="setClientsView('dbip')" title="Group by database and client IP together — which machine holds connections to which database">DB+IP</button>
-            <button id="cgQ"    class="clients-tab"        onclick="setClientsView('query')">Query</button>
-          </div>
-          <div style="flex:1"></div>
-          <button class="btn btn-secondary btn-sm" id="killIdleBtn" onclick="killIdlePg()" title="Terminate all idle server connections">☠ Kill idle</button>
-          <button class="btn btn-danger btn-sm" id="killAllBtn" onclick="killAllPg()" title="Terminate ALL server connections except this one">☠ Kill all</button>
-          <button class="btn btn-danger btn-sm" onclick="disconnectPg()" title="Release this app's local pool">⏏ Disconnect</button>
-          <button class="btn btn-secondary btn-sm" id="clientsExpandBtn" aria-label="Expand connected clients" onclick="toggleClientsExpand()" title="Expand">⤢</button>
-          <button class="btn btn-secondary btn-sm" aria-label="Close connected clients" onclick="toggleClientsPanel()">✕</button>
-        </div>
-        <div id="clientsTable" class="clients-panel-body"></div>
-      </div>
-      <div id="clientsOverlay" class="clients-overlay" onclick="toggleClientsExpand()"></div>
       <div class="panel-header">
         <span class="db-badge pg-badge" id="pgPanelBadge">PostgreSQL</span>
         <select id="pgSrvTypeSelect" class="srv-type-select" onchange="setPanelSrvType('pg', this.value)" title="Switch server type for this panel"><option value="ms">SQL Server</option><option value="pg" selected>PostgreSQL</option></select>
@@ -2003,7 +1993,7 @@ table.result-table th { position: relative; overflow: visible; }
               <span class="exec-time" id="pgExecTime"></span>
               <div class="find-in-results">
                 <div class="find-wrap">
-                  <input type="text" id="pgFindInput" placeholder="🔍 find in results…" oninput="applyGlobalFilter('pg',this.value)" title="Search across all columns">
+                  <input type="text" id="pgFindInput" placeholder="🔍 find in results…" oninput="scheduleGlobalFilter('pg',this.value)" title="Search across all columns">
                   <button class="find-clear" type="button" aria-label="Clear result filter" onclick="clearGlobalFilter('pg')" title="Clear">×</button>
                 </div>
               </div>
@@ -2217,6 +2207,7 @@ const state = {
 // Captured result snapshots for cross-editor / cross-tab comparison. In-memory
 // only. Each: { id, label, result:{columns,rows,statement} }.
 const compareSnapshots = [];
+const SNAPSHOT_LIMIT = 20;      // oldest are released past this; see captureResultSnapshot
 let _snapSeq = 0;
 
 // ── Panel server type (slot → 'ms'|'pg') ──────────────────────────────────────
@@ -2612,6 +2603,13 @@ function captureResultSnapshot(side, statementIndex) {
     : JSON.parse(JSON.stringify(source));
   const label = `${comparePaneLabel(side)} · #${statementIndex + 1} · ${statementPreview(source.statement, 50)} · ${new Date().toLocaleTimeString('en-GB')}`;
   compareSnapshots.push({ id, label, engine: srvType(side), result });
+  // Each snapshot is a full structuredClone of a result set (~300KB for 1000
+  // rows) and nothing ever released them, so a long session grew without bound.
+  // Keep the newest SNAPSHOT_LIMIT; resolveSource already tolerates a missing id.
+  if (compareSnapshots.length > SNAPSHOT_LIMIT) {
+    const dropped = compareSnapshots.splice(0, compareSnapshots.length - SNAPSHOT_LIMIT);
+    showToast(`Snapshot limit is ${SNAPSHOT_LIMIT} — released ${dropped.length} oldest`, 'info');
+  }
   if (document.getElementById('comparePanel')?.classList.contains('open')) {
     syncCompareColumns();
     renderComparison();
@@ -3739,9 +3737,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   renderMsProfileToggle();
   renderProfileToggle();
   _applyPanelSrvTypeUI();
-  // Split View is hidden for now — never start in 'both', and coerce any stored 'both'.
-  setMode(localStorage.getItem('lastMode') || 'both');
-  if (localStorage.getItem('panelsSwapped') === '1') swapPanels();
+  // The multi-pane "Workspace" mode was removed: only 'ms' and 'pg' remain, so a
+  // stored 'both' (or anything unrecognised) coerces to 'ms'. Panel swapping went
+  // with it — it only ever meant anything with both panes on screen at once.
+  const storedMode = localStorage.getItem('lastMode');
+  setMode(storedMode === 'ms' || storedMode === 'pg' ? storedMode : 'ms');
   restoreSidebarState();
   initPanelSplitter();
   initEditorSplitter('ms');
@@ -3766,7 +3766,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const status = document.getElementById('pgPoolStatus');
     if (panel && panel.classList.contains('visible') && !panel.classList.contains('expanded')
         && !panel.contains(e.target) && e.target !== status) {
-      panel.classList.remove('visible');
+      closeClientsPanel();
     }
   });
   try {
@@ -3793,8 +3793,13 @@ window.addEventListener('DOMContentLoaded', async () => {
 let lastPgClients = null;
 
 async function pollStatus() {
+  // The panel is hidden by a CSS class, so visibility must be read from
+  // classList — `style.display` is only ever '' and never gates anything.
+  // While it is closed the row list is not fetched either: rendering it every
+  // 5s into a display:none panel cost ~4.5k DOM nodes and 70KB+ per poll.
+  const clientsOpen = !!document.getElementById('clientsPanel')?.classList.contains('visible');
   try {
-    const status = await api('/api/status');
+    const status = await api('/api/status' + (clientsOpen ? '?clients=full' : ''));
     // Keep cache in sync with latest server config
     connCache.ms  = { server: status.ms?.server,  user: status.ms?.user };
     connCache.pg  = { host: status.pg?.host,  port: status.pg?.port,  user: status.pg?.user };
@@ -3810,23 +3815,34 @@ async function pollStatus() {
 
     const pgEl = document.getElementById('pgPoolStatus');
     const pgDisBtn = document.getElementById('pgDisconnectBtn');
-    if (pgEl) {
-      if (pg) {
-        const active = pg.total - pg.idle;
-        const clientCount = clients ? clients.count : '?';
-        const warn = (clients && clients.count > 8) || pg.waiting > 0;
-        pgEl.textContent = `pool ${active}/${pg.total} · ${clientCount} clients`;
-        pgEl.style.color = warn ? 'var(--yellow)' : active > 0 ? 'var(--green)' : 'var(--text-muted)';
-        if (pgDisBtn) pgDisBtn.style.display = '';
-      } else {
-        pgEl.textContent = clients ? `${clients.count} server clients` : 'no pool';
-        pgEl.style.color = 'var(--text-muted)';
-        if (pgDisBtn) pgDisBtn.style.display = 'none';
-      }
+    // Computed once and shown in two places: the PostgreSQL pane header, and the
+    // app header — the pane is hidden in SQL Server view, and the online-client
+    // count has to stay visible in every view.
+    let poolText, poolColor, clientsText;
+    if (pg) {
+      const active = pg.total - pg.idle;
+      const clientCount = clients ? clients.count : '?';
+      const warn = (clients && clients.count > 8) || pg.waiting > 0;
+      poolText = `pool ${active}/${pg.total} · ${clientCount} clients`;
+      poolColor = warn ? 'var(--yellow)' : active > 0 ? 'var(--green)' : 'var(--text-muted)';
+      clientsText = `${clientCount} clients`;
+      if (pgDisBtn) pgDisBtn.style.display = '';
+    } else {
+      poolText = clients ? `${clients.count} server clients` : 'no pool';
+      poolColor = 'var(--text-muted)';
+      clientsText = clients ? `${clients.count} clients` : '';
+      if (pgDisBtn) pgDisBtn.style.display = 'none';
+    }
+    if (pgEl) { pgEl.textContent = poolText; pgEl.style.color = poolColor; }
+    const hdrEl = document.getElementById('headerPgClients');
+    if (hdrEl) {
+      hdrEl.textContent = clientsText;
+      hdrEl.style.color = poolColor;
+      hdrEl.style.display = clientsText ? '' : 'none';
     }
 
     // Refresh clients table if panel is open
-    if (document.getElementById('clientsPanel').style.display !== 'none') renderClientsTable();
+    if (clientsOpen) renderClientsTable();
 
     const msPools = status.ms.pools;
     const msEl = document.getElementById('msPoolStatus');
@@ -3841,16 +3857,24 @@ async function pollStatus() {
   setTimeout(pollStatus, 5000);
 }
 
+// Closing must also drop the rendered rows: leaving them parked in a hidden
+// panel retains thousands of nodes for the life of the page, which is the same
+// cost the poll gating removes. Reopening re-fetches and re-renders.
+function closeClientsPanel() {
+  document.getElementById('clientsPanel').classList.remove('visible', 'expanded');
+  document.getElementById('clientsOverlay').classList.remove('visible');
+  document.getElementById('clientsTable').innerHTML = '';
+}
+
 function toggleClientsPanel() {
   const panel = document.getElementById('clientsPanel');
-  const overlay = document.getElementById('clientsOverlay');
   const isOpen = panel.classList.contains('visible');
   if (isOpen) {
-    panel.classList.remove('visible', 'expanded');
-    overlay.classList.remove('visible');
+    closeClientsPanel();
   } else {
     panel.classList.add('visible');
-    renderClientsTable();
+    renderClientsTable();  // paint immediately from the last poll
+    pollStatusOnce();      // rows are not polled while closed, so pull them now
   }
 }
 
@@ -3895,7 +3919,10 @@ function renderClientsTable() {
   const el = document.getElementById('clientsTable');
   const clients = lastPgClients;
   if (!clients || !clients.rows || !clients.rows.length) {
-    el.innerHTML = '<div style="padding:8px;color:var(--text-muted)">No other clients connected</div>';
+    // rows === null means the poll ran while the panel was closed and skipped
+    // them; the follow-up fetch from toggleClientsPanel will fill them in.
+    const pending = clients && clients.rows === null && clients.count > 0;
+    el.innerHTML = `<div style="padding:8px;color:var(--text-muted)">${pending ? 'Loading clients…' : 'No other clients connected'}</div>`;
     return;
   }
   const rows = clients.rows;
@@ -4055,12 +4082,13 @@ const killAllPg  = () => killByScope('all', 'ALL connections (except this app)')
 
 // Refresh status immediately without waiting for the 5s poll
 async function pollStatusOnce() {
+  const clientsOpen = !!document.getElementById('clientsPanel')?.classList.contains('visible');
   try {
-    const status = await api('/api/status');
+    const status = await api('/api/status' + (clientsOpen ? '?clients=full' : ''));
     lastPgClients = status.pg.clients;
     pgIsReadOnly = !!status.pg.readOnly;
     syncKillControls();
-    if (document.getElementById('clientsPanel').classList.contains('visible')) renderClientsTable();
+    if (clientsOpen) renderClientsTable();
   } catch {}
 }
 
@@ -4068,12 +4096,12 @@ async function disconnectPg() {
   try {
     await api('/api/pg/disconnect', 'POST');
     document.getElementById('pgPoolStatus').textContent = 'disconnected';
+    const hdrEl = document.getElementById('headerPgClients');
+    if (hdrEl) hdrEl.style.display = 'none';
     showToast('PostgreSQL disconnected', 'info');
     document.getElementById('pgPoolStatus').style.color = 'var(--text-muted)';
     document.getElementById('pgDisconnectBtn').style.display = 'none';
-    const cp = document.getElementById('clientsPanel');
-    cp.classList.remove('visible', 'expanded');
-    document.getElementById('clientsOverlay').classList.remove('visible');
+    closeClientsPanel();
   } catch (e) {
     alert('Disconnect failed: ' + e.message);
   }
@@ -4086,6 +4114,7 @@ let isSyncing = false;
 function toggleSyncScroll() {
   syncScrollEnabled = !syncScrollEnabled;
   const btn = document.getElementById('syncScrollBtn');
+  if (!btn) return;   // control was removed with the multi-pane view
   btn.textContent = `⇔ Sync Scroll: ${syncScrollEnabled ? 'ON' : 'OFF'}`;
   btn.style.borderColor = syncScrollEnabled ? 'var(--green)' : '';
   btn.style.color = syncScrollEnabled ? 'var(--green)' : '';
@@ -4993,6 +5022,10 @@ function setupHScrollOverlay(containerId) {
 
 function renderResults(containerId, columns, rows, typeMap = {}) {
   const el = document.getElementById(containerId);
+  // The container can be replaced out from under us (a parent re-render detaches
+  // its statement blocks). Drop the orphaned virt state instead of dereferencing
+  // a null node.
+  if (!el) { delete virtState[containerId]; return; }
 
   // Detach any previous virtual-scroll handler on this container
   if (virtState[containerId] && virtState[containerId].scrollHandler) {
@@ -5762,8 +5795,9 @@ function renderMsProfileToggle() {
   container.innerHTML = _defBtn + profiles.map(p =>
     `<button class="profile-btn${activeMsProfile === p.name ? ' active' : ''}${p.readOnly ? ' readonly' : ''}"
       data-profile="${escAttr(p.name)}"
-      title="${p.readOnly ? 'Read-only profile (writes blocked)\n' : ''}Right-click to delete"
+      title="${p.readOnly ? 'Read-only profile (writes blocked)\n' : ''}Double-click to rename · Right-click to delete"
       oncontextmenu="return deleteMsProfile(event, this.dataset.profile)"
+      ondblclick="renameProfile('ms', this.dataset.profile)"
       onclick="switchMsProfile(this.dataset.profile)">${p.readOnly ? '🔒 ' : ''}${esc(p.name)}<span class="profile-del" title="Delete profile" onclick="event.stopPropagation();deleteMsProfile(event, this.closest('button').dataset.profile)">×</span></button>`
   ).join('') + addBtn;
 }
@@ -5786,9 +5820,13 @@ async function switchMsToDefault() {
 }
 
 async function switchMsProfile(name) {
+  // A double-click (the rename gesture) fires click twice. Without these guards
+  // that costs two /connect round-trips and races the rename that follows.
+  if (activeMsProfile === name || _profileSwitchInFlight === 'ms:' + name) return;
   const profiles = loadMsProfiles();
   const profile = profiles.find(p => p.name === name);
   if (!profile) return;
+  _profileSwitchInFlight = 'ms:' + name;
   try {
     await api(srvApi('ms') + '/connect', 'POST', {
       server: profile.server,
@@ -5799,13 +5837,16 @@ async function switchMsProfile(name) {
     connCache.ms = { server: profile.server, user: profile.user };
     readOnlyState.ms = !!profile.readOnly;
     rememberLastConn('ms', { server: profile.server, user: profile.user, password: profile.password, readOnly: !!profile.readOnly });
-    activeMsProfile = name;
+    // A rename may have landed while this connect was in flight — don't resurrect
+    // the old name as the active profile.
+    if (loadMsProfiles().some(p => p.name === name)) activeMsProfile = name;
     renderMsProfileToggle();
     await loadMsDatabases();
     showToast(`Connected to SQL Server · ${name}`, 'info');
   } catch (e) {
     showToast(`Failed to switch to ${name}: ${e.message}`, 'error', true);
   } finally {
+    _profileSwitchInFlight = null;
     renderConnectionLedger('ms');
   }
 }
@@ -5843,8 +5884,9 @@ function renderProfileToggle() {
   container.innerHTML = _defBtn + profiles.map(p =>
     `<button class="profile-btn${activePgProfile === p.name ? ' active' : ''}${p.readOnly ? ' readonly' : ''}"
       data-profile="${escAttr(p.name)}"
-      title="${p.readOnly ? 'Read-only profile (writes blocked)\n' : ''}Right-click to delete"
+      title="${p.readOnly ? 'Read-only profile (writes blocked)\n' : ''}Double-click to rename · Right-click to delete"
       oncontextmenu="return deletePgProfile(event, this.dataset.profile)"
+      ondblclick="renameProfile('pg', this.dataset.profile)"
       onclick="switchPgProfile(this.dataset.profile)">${p.readOnly ? '🔒 ' : ''}${esc(p.name)}<span class="profile-del" title="Delete profile" onclick="event.stopPropagation();deletePgProfile(event, this.closest('button').dataset.profile)">×</span></button>`
   ).join('') + addBtn;
 }
@@ -5866,10 +5908,15 @@ async function switchPgToDefault() {
   }
 }
 
+// Set while a profile connect is in flight, as 'engine:name'. See switchMsProfile.
+let _profileSwitchInFlight = null;
+
 async function switchPgProfile(name) {
+  if (activePgProfile === name || _profileSwitchInFlight === 'pg:' + name) return;
   const profiles = loadPgProfiles();
   const profile = profiles.find(p => p.name === name);
   if (!profile) return;
+  _profileSwitchInFlight = 'pg:' + name;
   try {
     await api(srvApi('pg') + '/connect', 'POST', {
       host: profile.host,
@@ -5881,15 +5928,60 @@ async function switchPgProfile(name) {
     connCache.pg = { host: profile.host, port: profile.port, user: profile.user };
     readOnlyState.pg = !!profile.readOnly;
     rememberLastConn('pg', { host: profile.host, port: profile.port, user: profile.user, password: profile.password, readOnly: !!profile.readOnly });
-    activePgProfile = name;
+    if (loadPgProfiles().some(p => p.name === name)) activePgProfile = name;
     renderProfileToggle();
     await loadPgDatabases();
     showToast(`Connected to PostgreSQL · ${name}`, 'info');
   } catch (e) {
     showToast(`Failed to switch to ${name}: ${e.message}`, 'error', true);
   } finally {
+    _profileSwitchInFlight = null;
     renderConnectionLedger('pg');
   }
+}
+
+// ── Profile rename ────────────────────────────────────────────────────────────
+// Double-click a profile chip to rename it; left-click switches, right-click
+// deletes. Only the name changes — the stored password and connection fields are
+// carried across untouched. The ⭐ Default chip comes from .env, not localStorage,
+// so it has no rename affordance.
+const PROFILE_NAME_MAX = 60;
+
+function renameProfile(engine, oldName) {
+  const load  = engine === 'ms' ? loadMsProfiles : loadPgProfiles;
+  const save  = engine === 'ms' ? saveMsProfiles : savePgProfiles;
+  const label = engine === 'ms' ? 'SQL Server' : 'PostgreSQL';
+  const profiles = load();
+  const profile = profiles.find(p => p.name === oldName);
+  if (!profile) return;
+
+  const input = prompt(`Rename ${label} profile "${oldName}" to:`, oldName);
+  if (input === null) return;                       // cancelled
+  const name = input.trim();
+  if (!name) { showToast('Profile name cannot be empty', 'error'); return; }
+  if (name.length > PROFILE_NAME_MAX) { showToast(`Profile name is limited to ${PROFILE_NAME_MAX} characters`, 'error'); return; }
+  if (name === oldName) return;
+  // The name is the lookup key for switching and deleting, so it must stay unique.
+  if (profiles.some(p => p !== profile && p.name.toLowerCase() === name.toLowerCase())) {
+    showToast(`A ${label} profile named "${name}" already exists`, 'error');
+    return;
+  }
+
+  save(profiles.map(p => (p === profile ? { ...p, name } : p)));
+  // Adopt the new name if this profile is active *or* is mid-connect — the click
+  // that opened this prompt may still be in flight, and its post-await guard will
+  // decline to set the now-stale old name.
+  const switching = _profileSwitchInFlight === engine + ':' + oldName;
+  if (engine === 'ms' && (activeMsProfile === oldName || switching)) activeMsProfile = name;
+  if (engine === 'pg' && (activePgProfile === oldName || switching)) activePgProfile = name;
+  // Any pane bound to the old name must follow it, or its picker loses its selection.
+  Object.entries(dynamicPanels).forEach(([id, panel]) => {
+    if (panel.engine === engine && panel.profileName === oldName) panel.profileName = name;
+    renderDynamicProfilePicker(id);
+  });
+  renderMsProfileToggle();
+  renderProfileToggle();
+  showToast(`Renamed profile · ${oldName} → ${name}`, 'success');
 }
 
 function deletePgProfile(event, name) {
@@ -6223,7 +6315,7 @@ function panelTemplateHTML(id) {
             <span class="exec-time" id="${id}VisibleRange" style="font-size:11px;color:var(--text-muted)"></span>
             <span class="exec-time" id="${id}ExecTime"></span>
             <div class="find-in-results"><div class="find-wrap">
-              <input type="text" id="${id}FindInput" placeholder="🔍 find in results…" oninput="applyGlobalFilter('${id}',this.value)">
+              <input type="text" id="${id}FindInput" placeholder="🔍 find in results…" oninput="scheduleGlobalFilter('${id}',this.value)">
               <button class="find-clear" type="button" aria-label="Clear result filter" onclick="clearGlobalFilter('${id}')">×</button>
             </div></div>
             <span class="cell-preview" id="${id}CellPreview"></span>
@@ -6274,20 +6366,11 @@ let _panelLayoutRestored = false;
 async function restorePanelLayout() {
   if (_panelLayoutRestored) return;
   _panelLayoutRestored = true;
-  let layout = [];
-  try { layout = SQLConnectUX.sanitizePanelLayout(JSON.parse(localStorage.getItem(WORKSPACE_PANELS_KEY) || '[]')); } catch {}
-  _restoringPanelLayout = true;
-  let failures = 0;
-  for (const meta of layout) {
-    const id = addPanel(meta.engine, { ...meta, restoring: true });
-    const profile = dynamicProfile(id);
-    if (profile) {
-      try { await connectDynamicPanel(id, profile); }
-      catch { failures++; }
-    }
-  }
-  if (failures) showToast(`${failures} restored pane${failures === 1 ? '' : 's'} could not reconnect`, 'info');
-  _restoringPanelLayout = false;
+  // Multi-pane view was removed, so stored panes are no longer restored. Doing so
+  // would recreate them off-screen *and* reconnect each one, leaving pooled
+  // database connections held by panes nobody can see or close. The stored layout
+  // is deliberately left in localStorage rather than cleared, so the panes come
+  // back if the mode ever does.
   setActivePanel(activePanelId);
 }
 
@@ -7115,6 +7198,14 @@ function startColResize(e, containerId, col) {
 }
 
 // ── Find in results ───────────────────────────────────────────────────────────
+// Filtering re-renders every result block, which costs ~60ms on a 20k-row set —
+// enough to make typing stutter when run on each keystroke. Coalesce bursts.
+const _globalFilterTimer = {};
+function scheduleGlobalFilter(side, q) {
+  clearTimeout(_globalFilterTimer[side]);
+  _globalFilterTimer[side] = setTimeout(() => applyGlobalFilter(side, q), 150);
+}
+
 function applyGlobalFilter(side, q) {
   const mainId = side + 'Results';
   Object.keys(viewState).forEach(k => {
@@ -7127,6 +7218,9 @@ function applyGlobalFilter(side, q) {
 function clearGlobalFilter(side) {
   const input = document.getElementById(side + 'FindInput');
   if (input) input.value = '';
+  // Drop any keystroke still waiting in the debounce, or it would land after
+  // this and re-apply the filter the user just cleared.
+  clearTimeout(_globalFilterTimer[side]);
   applyGlobalFilter(side, '');
 }
 
@@ -7185,16 +7279,18 @@ function toggleSnippets(side, e) {
   if (!isOpen) {
     renderSnippets(side);
     el.classList.add('open');
-    setTimeout(() => {
-      document.addEventListener('click', function handler(ev) {
-        if (!el.contains(ev.target)) {
-          el.classList.remove('open');
-          document.removeEventListener('click', handler);
-        }
-      });
-    }, 0);
   }
 }
+
+// One listener for the life of the page, mirroring the history popover. The
+// previous per-open handler removed itself only when a click reached document —
+// but closing from the toggle button stopPropagation()s first, so every open
+// leaked a handler that then ran on every subsequent click.
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('.snippets-popover.open').forEach(p => {
+    if (!p.contains(e.target)) p.classList.remove('open');
+  });
+});
 
 // ── Paste as VALUES ───────────────────────────────────────────────────────────
 const _pendingPaste = { ms: null, pg: null };
@@ -7394,7 +7490,7 @@ function showToast(message, type = 'info', persist = false, action = null) {
   }
   toast.onclick = () => toast.remove();
   container.appendChild(toast);
-  if (!persist && !action) setTimeout(() => toast.remove(), 3000);
+  if (!persist) setTimeout(() => toast.remove(), 3000);
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -7538,9 +7634,10 @@ function setMode(mode) {
   document.getElementById('msPanelBadge').style.display = isBoth ? 'none' : '';
   document.getElementById('pgPanelBadge').style.display = isBoth ? 'none' : '';
   if (!isBoth) closeCompare();
-  const activeModeButton = { ms: 'modeMsBtn', both: 'modeBothBtn', pg: 'modePgBtn' }[mode];
-  ['modeMsBtn','modeBothBtn','modePgBtn'].forEach((id) => {
+  const activeModeButton = { ms: 'modeMsBtn', pg: 'modePgBtn' }[mode];
+  ['modeMsBtn','modePgBtn'].forEach((id) => {
     const button = document.getElementById(id);
+    if (!button) return;
     button.classList.toggle('active', id === activeModeButton);
     button.setAttribute('aria-pressed', String(id === activeModeButton));
   });
@@ -8930,7 +9027,12 @@ async function tryDecompressString(str, force = false) {
 function rerenderAllResults(side) {
   const mainId = side + 'Results';
   const keys = Object.keys(viewState).filter(k => k === mainId || k.startsWith(mainId + '__'));
-  keys.forEach(k => rerenderResults(k));
+  // Per-statement blocks live *inside* the outer container. Re-rendering the
+  // outer one first replaces its innerHTML and detaches those blocks, so the
+  // follow-up pass then rendered into a node that no longer existed. When
+  // statement blocks are present they are the only things that need refreshing.
+  const stmtKeys = keys.filter(k => k !== mainId);
+  (stmtKeys.length ? stmtKeys : keys).forEach(k => rerenderResults(k));
 }
 
 function _looksLikeTSV(text) {
