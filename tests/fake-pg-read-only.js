@@ -1,4 +1,5 @@
 const Module = require('node:module');
+const { EventEmitter } = require('node:events');
 
 class FakePgClient {
   constructor() {
@@ -21,8 +22,10 @@ class FakePgClient {
   release() {}
 }
 
-class FakePgPool {
+// pg.Pool is an EventEmitter, and server.js attaches a pool 'error' listener.
+class FakePgPool extends EventEmitter {
   constructor() {
+    super();
     this.totalCount = 0;
     this.idleCount = 0;
     this.waitingCount = 0;

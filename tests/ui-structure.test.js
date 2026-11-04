@@ -846,3 +846,18 @@ test('the clients row list is fetched only while the panel is open', () => {
   assert.match(status, /rows:\s*null/);
   assert.match(status, /else\s*\{[\s\S]*?json_agg[\s\S]*?rdnsLookup/);
 });
+
+test('Tab in the editor stays in the editor and cannot collapse the results pane', () => {
+  const html = readHtml();
+
+  // getSearchCursor comes from the searchcursor addon, which is not loaded. A
+  // call in the Tab path threw, so the browser moved focus onto the editor
+  // divider and the next End/ArrowDown resized the editor over the results.
+  if (!/\/addon\/search\/searchcursor/.test(html)) {
+    assert.doesNotMatch(html, /\.getSearchCursor\(/);
+  }
+  // Even at the 1200px keyboard max (persisted in localStorage), the editor
+  // must shrink before the results pane drops below its 80px minimum.
+  assert.match(html, /\.cm-editor-wrap \{\s*flex-shrink: 1;/);
+  assert.match(html, /\.editor-area > \.results-area \{ min-height: 80px; \}/);
+});

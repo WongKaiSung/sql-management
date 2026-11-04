@@ -490,8 +490,10 @@
   .editor-toolbar > button, .editor-toolbar > label { flex-shrink: 0; }
 
   /* ── CodeMirror overrides ── */
+  /* Shrinkable so a saved or keyboard-set height (up to 1200px) can never push
+     the results pane to 0px — the results keep RESULTS_MIN_PX (80px) below. */
   .cm-editor-wrap {
-    flex-shrink: 0;
+    flex-shrink: 1;
     border-bottom: 1px solid var(--border);
     height: 240px;
     min-height: 60px;
@@ -555,6 +557,7 @@
     min-width: 0;
     min-height: 0;
   }
+  .editor-area > .results-area { min-height: 80px; }
 
   /* Indeterminate progress bar — shown while a query/operation is running */
   .progress-bar {
@@ -7916,14 +7919,18 @@ function maybeAutofillInsert(editor) {
   });
 }
 
+// Plain line scan rather than getSearchCursor: that needs the searchcursor addon,
+// which is not loaded. It threw inside the Tab key handler, so CodeMirror never
+// claimed the key and the browser moved focus out of the editor onto the divider.
 function selectNextPlaceholder(editor, fromPos) {
   const start = fromPos || editor.getCursor();
   const lastLine = Math.min(editor.lastLine(), start.line + 4);
-  const sc = editor.getSearchCursor(/<[^<>\s]+>/g, start);
-  if (sc.findNext()) {
-    const f = sc.from(), t = sc.to();
-    if (f.line <= lastLine) {
-      editor.setSelection(f, t);
+  const re = /<[^<>\s]+>/g;
+  for (let line = start.line; line <= lastLine; line++) {
+    re.lastIndex = line === start.line ? start.ch : 0;
+    const m = re.exec(editor.getLine(line));
+    if (m) {
+      editor.setSelection({ line, ch: m.index }, { line, ch: m.index + m[0].length });
       return true;
     }
   }
