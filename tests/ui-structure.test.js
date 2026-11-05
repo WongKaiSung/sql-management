@@ -119,12 +119,11 @@ test('accessible workbench shell and active-pane contracts are present', () => {
   const directHeader = header.replace(/<div\b[^>]*id=["']appToolsMenu["'][\s\S]*?<\/div>/i, '');
 
   assert.match(html, /<main\b[^>]*>/i);
-  assert.match(html, /<button\b[^>]*id=["']modeBothBtn["'][^>]*>\s*Workspace\s*<\/button>/i);
-  assert.doesNotMatch(html, /id=["']modeBothBtn["'][^>]*style=["'][^"']*display\s*:\s*none/i);
-  assert.match(html, /<button\b[^>]*id=["']workspaceRunBtn["'][^>]*>\s*⚡\s*Run visible\s*<\/button>/i);
+  assert.match(html, /<button\b[^>]*id=["']modeMsBtn["'][^>]*>\s*SQL Server\s*<\/button>/i);
+  assert.match(html, /<button\b[^>]*id=["']modePgBtn["'][^>]*>\s*PostgreSQL\s*<\/button>/i);
   assert.match(html, /id=["']appToolsBtn["'][^>]*aria-haspopup=["']menu["'][^>]*aria-controls=["']appToolsMenu["'][^>]*aria-expanded=/i);
   assert.match(html, /<div\b[^>]*id=["']appToolsMenu["'][^>]*role=["']menu["']/i);
-  for (const label of ['Decompress', 'Text compare', 'Query Library', 'Keyboard shortcuts', 'Sync scroll', 'Swap panes', 'Theme']) {
+  for (const label of ['Decompress', 'Text compare', 'Query Library', 'Keyboard shortcuts', 'Theme']) {
     assert.match(header, new RegExp(`<[^>]+role=["']menuitem["'][^>]*>[^<]*${label}`, 'i'));
     assert.doesNotMatch(directHeader, new RegExp(`>[^<]*${label}`, 'i'));
   }
@@ -156,8 +155,9 @@ test('workspace comparison and visible execution contracts are present', () => {
   for (const control of ['closeCompare', 'onCompareSourceChange', 'renderComparison', 'addMapping', 'compareStats', 'compareScroll']) {
     assert.match(compare, new RegExp(control));
   }
+  // Comparison survives the removal of multi-pane view: it reads explicitly
+  // captured snapshots, not live panes, so it works one pane at a time.
   assert.match(menu, /role=["']menuitem["'][^>]*onclick=["']openCompare\(\)["'][^>]*>\s*Compare results/i);
-  assert.match(html, /id=["']workspaceRunBtn["'][^>]*onclick=["']executeVisible\(\)["']/i);
   assert.match(comparable, /for\s*\(const\s+side\s+of\s+panelIds\(\)\)/);
   assert.match(comparable, /compareSnapshots/);
   assert.doesNotMatch(comparable, /Object\.keys\(state\)|\[['"]ms['"],\s*['"]pg['"]\]/);
@@ -648,4 +648,216 @@ test('fixed connection submission captures modal context across its connect awai
   assert.match(save, /await\s+api\([^;]+\);[\s\S]*?if\s*\(!ownsFixedSubmission\(\)\)[\s\S]*?return\s+false/);
   assert.doesNotMatch(save, /connCache\[connModalSide\]/);
   assert.match(save, /catch\s*\([^)]*\)[\s\S]*?ownsFixedSubmission\(\)[\s\S]*?errEl/);
+});
+
+test('re-rendering results refreshes statement blocks without detaching them', () => {
+  const html = readHtml();
+  const all = html.slice(html.indexOf('function rerenderAllResults(side)'), html.indexOf('function _looksLikeTSV('));
+  const render = html.slice(html.indexOf('function renderResults(containerId'), html.indexOf('function fmtCell('));
+
+  // Re-rendering the outer container replaces its innerHTML and detaches the
+  // per-statement blocks, so refreshing those must not follow it.
+  assert.match(all, /const stmtKeys = keys\.filter\(k => k !== mainId\)/);
+  assert.match(all, /\(stmtKeys\.length \? stmtKeys : keys\)\.forEach/);
+  // Defence in depth: never dereference a container that has been replaced.
+  assert.match(render, /if \(!el\) \{ delete virtState\[containerId\]; return; \}/);
+  assert.match(render, /if \(!el\)[\s\S]*?el\.removeEventListener/);
+});
+
+test('comparison snapshots are bounded so a long session cannot grow forever', () => {
+  const html = readHtml();
+  const capture = html.slice(html.indexOf('function captureResultSnapshot('), html.indexOf('// ── Query Tabs'));
+
+  assert.match(html, /const SNAPSHOT_LIMIT = \d+/);
+  assert.match(capture, /compareSnapshots\.length > SNAPSHOT_LIMIT/);
+  assert.match(capture, /compareSnapshots\.splice\(0, compareSnapshots\.length - SNAPSHOT_LIMIT\)/);
+  // Dropping ids must stay safe for anything still pointing at them.
+  const resolve = html.slice(html.indexOf('function resolveSource(slot)'), html.indexOf('function _cmpSideLabel('));
+  assert.match(resolve, /sn \? \{[\s\S]*?\} : null/);
+});
+
+test('the snippets popover closes from one shared listener, not one per open', () => {
+  const html = readHtml();
+  const toggle = html.slice(html.indexOf('function toggleSnippets(side, e)'), html.indexOf('// ── Paste as VALUES'));
+
+  // The old per-open handler removed itself only if a click reached document,
+  // which the toggle button's stopPropagation() prevented — so opens leaked.
+  assert.doesNotMatch(toggle, /document\.addEventListener\('click', function handler/);
+  assert.doesNotMatch(toggle, /removeEventListener/);
+  assert.match(toggle, /document\.addEventListener\('click'[\s\S]*?snippets-popover\.open[\s\S]*?p\.contains\(e\.target\)/);
+});
+
+test('find-in-results is debounced and cancels pending work when cleared', () => {
+  const html = readHtml();
+  const clear = html.slice(html.indexOf('function clearGlobalFilter(side)'), html.indexOf('// ── Row counts'));
+
+  assert.equal(count(html, /oninput="applyGlobalFilter\(/g), 0, 'no input filters undebounced');
+  assert.equal(count(html, /oninput="scheduleGlobalFilter\(/g), 3, 'all three find inputs debounced');
+  assert.match(html, /function scheduleGlobalFilter\(side, q\)[\s\S]*?clearTimeout\(_globalFilterTimer\[side\]\)[\s\S]*?setTimeout\(\(\) => applyGlobalFilter\(side, q\), \d+\)/);
+  assert.match(clear, /clearTimeout\(_globalFilterTimer\[side\]\)[\s\S]*?applyGlobalFilter\(side, ''\)/);
+});
+
+test('the multi-pane Workspace view is gone and its controls go with it', () => {
+  const html = readHtml();
+  const header = html.match(/<header\b[\s\S]*?<\/header>/i)?.[0] || '';
+  const selector = html.match(/<div class="mode-selector"[\s\S]*?<\/div>/i)?.[0] || '';
+
+  for (const id of ['modeBothBtn', 'addPanelBtn', 'workspaceRunBtn', 'swapPanelsBtn', 'syncScrollBtn', 'workspaceBar', 'closeExtraPanesBtn']) {
+    assert.equal(count(html, new RegExp(`id=["']${id}["']`, 'gi')), 0, `${id} is removed`);
+  }
+  assert.equal(count(selector, /<button/g), 2, 'exactly SQL Server and PostgreSQL remain');
+  assert.doesNotMatch(header, />\s*Workspace\s*</);
+  assert.doesNotMatch(html, /setMode\('both'\)"/);
+});
+
+test('code that survived the Workspace removal never dereferences a removed element', () => {
+  const html = readHtml();
+  const setMode = html.slice(html.indexOf('function setMode(mode)'), html.indexOf('function swapPanels()'));
+  const syncScroll = html.slice(html.indexOf('function toggleSyncScroll()'), html.indexOf('function toggleSyncScroll()') + 400);
+
+  // setMode ran on every boot and threw on the deleted modeBothBtn, which killed
+  // the rest of DOMContentLoaded: no /api/status, no databases, no pollStatus.
+  assert.doesNotMatch(setMode, /modeBothBtn/);
+  assert.match(setMode, /\['modeMsBtn','modePgBtn'\]\.forEach/);
+  assert.match(setMode, /const button = document\.getElementById\(id\);\s*\r?\n\s*if \(!button\) return;/);
+  assert.match(syncScroll, /if \(!btn\) return;/);
+  // Nothing may reference the removed id at all, in markup, script, or CSS.
+  assert.equal(count(html, /modeBothBtn/g), 0);
+});
+
+test('the clients panel and its count are reachable from every view', () => {
+  const html = readHtml();
+  const poll = html.slice(html.indexOf('async function pollStatus()'), html.indexOf('function closeClientsPanel()'));
+  const header = html.match(/<header\b[\s\S]*?<\/header>/i)?.[0] || '';
+  const main = html.slice(html.indexOf('<main id="appMain"'), html.indexOf('id="pgPanel"'));
+
+  // Both used to live inside pgPanel, so SQL Server view hid the online-client
+  // count entirely and the panel could not be opened at all.
+  assert.match(header, /id="headerPgClients"[^>]*onclick="toggleClientsPanel\(\)"/);
+  assert.match(main, /id="clientsPanel"/, 'clients panel is a child of main, not pgPanel');
+  assert.ok(html.indexOf('id="clientsPanel"') < html.indexOf('id="pgPanel"'), 'clients panel is outside pgPanel');
+  assert.match(html, /<main id="appMain"[^>]*position:relative/);
+  assert.match(poll, /const hdrEl = document\.getElementById\('headerPgClients'\)/);
+  assert.match(poll, /hdrEl\.textContent = clientsText/);
+});
+
+test('a stored Workspace mode is coerced rather than honoured at boot', () => {
+  const html = readHtml();
+  const initStart = html.indexOf("window.addEventListener('DOMContentLoaded', async () => {");
+  const init = html.slice(initStart, html.indexOf('// ── Table browser', initStart));
+
+  assert.match(init, /storedMode\s*===\s*'ms'\s*\|\|\s*storedMode\s*===\s*'pg'\s*\?\s*storedMode\s*:\s*'ms'/);
+  assert.doesNotMatch(init, /localStorage\.getItem\('lastMode'\)\s*\|\|\s*'both'/);
+  assert.doesNotMatch(init, /panelsSwapped/);
+});
+
+test('stored panes are not silently reconnected now that they cannot be shown', () => {
+  const html = readHtml();
+  const restore = html.slice(html.indexOf('async function restorePanelLayout()'), html.indexOf('function dynamicProfile(side)'));
+
+  // Restoring them would hold pooled connections for panes nobody can see or close.
+  assert.doesNotMatch(restore, /connectDynamicPanel/);
+  assert.doesNotMatch(restore, /addPanel\(/);
+  assert.match(restore, /setActivePanel\(activePanelId\)/);
+});
+
+test('profiles are renamable by double-click, with the name kept unique', () => {
+  const html = readHtml();
+  const rename = html.slice(html.indexOf('function renameProfile(engine, oldName)'), html.indexOf('function deletePgProfile('));
+
+  for (const engine of ['ms', 'pg']) {
+    assert.match(html, new RegExp(`ondblclick="renameProfile\\('${engine}', this\\.dataset\\.profile\\)"`));
+  }
+  assert.match(html, /Double-click to rename · Right-click to delete/);
+  assert.match(rename, /const name = input\.trim\(\)/);
+  assert.match(rename, /if \(!name\)/);
+  assert.match(rename, /PROFILE_NAME_MAX/);
+  assert.match(rename, /p\.name\.toLowerCase\(\) === name\.toLowerCase\(\)/);
+  // Rename carries the password and every other field; only `name` changes.
+  assert.match(rename, /\{ \.\.\.p, name \}/);
+  // Renaming a profile whose connect is still in flight must still adopt the new
+  // name — the switch's own post-await guard declines to set the stale old one.
+  assert.match(rename, /const switching = _profileSwitchInFlight === engine \+ ':' \+ oldName/);
+  assert.match(rename, /activeMsProfile === oldName \|\| switching\)\) activeMsProfile = name/);
+  assert.match(rename, /activePgProfile === oldName \|\| switching\)\) activePgProfile = name/);
+  assert.match(rename, /panel\.profileName === oldName\) panel\.profileName = name/);
+});
+
+test('a double-click does not fire two connects or race the rename it triggers', () => {
+  const html = readHtml();
+  const ms = html.slice(html.indexOf('async function switchMsProfile(name)'), html.indexOf('function deleteMsProfile('));
+  const pg = html.slice(html.indexOf('async function switchPgProfile(name)'), html.indexOf('function deletePgProfile('));
+
+  assert.match(html, /let _profileSwitchInFlight = null/);
+  for (const [engine, source] of [['ms', ms], ['pg', pg]]) {
+    const active = engine === 'ms' ? 'activeMsProfile' : 'activePgProfile';
+    const load = engine === 'ms' ? 'loadMsProfiles' : 'loadPgProfiles';
+    assert.match(source, new RegExp(`if \\(${active} === name \\|\\| _profileSwitchInFlight === '${engine}:' \\+ name\\) return`));
+    assert.match(source, new RegExp(`_profileSwitchInFlight = '${engine}:' \\+ name`));
+    // A rename landing mid-connect must not resurrect the old name.
+    assert.match(source, new RegExp(`if \\(${load}\\(\\)\\.some\\(p => p\\.name === name\\)\\) ${active} = name`));
+    assert.match(source, /finally \{\s*_profileSwitchInFlight = null/);
+  }
+});
+
+test('the clients panel is hidden by class, so visibility is never read from inline style', () => {
+  const html = readHtml();
+  const toggle = html.slice(html.indexOf('function toggleClientsPanel()'), html.indexOf('function renderClientsTable()'));
+
+  assert.match(html, /\.clients-panel\s*\{[^}]*display:\s*none/);
+  assert.match(html, /\.clients-panel\.visible\s*\{\s*display:\s*flex/);
+  assert.match(toggle, /classList\.contains\(['"]visible['"]\)/);
+  assert.doesNotMatch(toggle, /\.style\.display/);
+});
+
+test('the status poll skips renderClientsTable while the panel is closed', () => {
+  const html = readHtml();
+  const poll = html.slice(html.indexOf('async function pollStatus()'), html.indexOf('function toggleClientsPanel()'));
+  const once = html.slice(html.indexOf('async function pollStatusOnce()'), html.indexOf('async function disconnectPg()'));
+
+  // `clientsPanel.style.display` is only ever '' — the panel is hidden by a CSS
+  // class — so an inline-style guard never blocks and the poll rebuilds a
+  // multi-thousand-node table into a display:none panel every 5 seconds.
+  for (const source of [poll, once]) {
+    assert.doesNotMatch(source, /clientsPanel['"]\)\.style\.display/);
+    assert.match(source, /clientsOpen\s*=\s*!!document\.getElementById\('clientsPanel'\)\?\.classList\.contains\('visible'\)/);
+    assert.match(source, /if\s*\(clientsOpen\)\s*renderClientsTable\(\)/);
+  }
+});
+
+test('the clients row list is fetched only while the panel is open', () => {
+  const html = readHtml();
+  const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const poll = html.slice(html.indexOf('async function pollStatus()'), html.indexOf('function toggleClientsPanel()'));
+  const toggle = html.slice(html.indexOf('function toggleClientsPanel()'), html.indexOf('function renderClientsTable()'));
+  const status = server.slice(server.indexOf('const wantClientRows'), server.indexOf('const msPools = {}'));
+
+  assert.match(poll, /api\('\/api\/status'\s*\+\s*\(clientsOpen\s*\?\s*'\?clients=full'\s*:\s*''\)\)/);
+  assert.match(toggle, /classList\.add\('visible'\)[\s\S]*?pollStatusOnce\(\)/);
+  // Every close path drops the rendered rows instead of parking them hidden.
+  const close = html.slice(html.indexOf('function closeClientsPanel()'), html.indexOf('function toggleClientsPanel()'));
+  assert.match(close, /clientsTable'\)\.innerHTML\s*=\s*''/);
+  assert.equal(count(html, /classList\.remove\('visible', 'expanded'\)/g), 1, 'a single close path');
+  assert.match(toggle, /if\s*\(isOpen\)\s*\{\s*closeClientsPanel\(\);/);
+  assert.match(html, /async function disconnectPg\(\)[\s\S]*?closeClientsPanel\(\)/);
+  assert.match(status, /req\.query\.clients\s*===\s*'full'/);
+  // The count is always needed for the header; only the aggregate is opt-in.
+  assert.match(status, /if\s*\(!wantClientRows\)[\s\S]*?SELECT count\(\*\)::int AS n FROM pg_stat_activity/);
+  assert.match(status, /rows:\s*null/);
+  assert.match(status, /else\s*\{[\s\S]*?json_agg[\s\S]*?rdnsLookup/);
+});
+
+test('Tab in the editor stays in the editor and cannot collapse the results pane', () => {
+  const html = readHtml();
+
+  // getSearchCursor comes from the searchcursor addon, which is not loaded. A
+  // call in the Tab path threw, so the browser moved focus onto the editor
+  // divider and the next End/ArrowDown resized the editor over the results.
+  if (!/\/addon\/search\/searchcursor/.test(html)) {
+    assert.doesNotMatch(html, /\.getSearchCursor\(/);
+  }
+  // Even at the 1200px keyboard max (persisted in localStorage), the editor
+  // must shrink before the results pane drops below its 80px minimum.
+  assert.match(html, /\.cm-editor-wrap \{\s*flex-shrink: 1;/);
+  assert.match(html, /\.editor-area > \.results-area \{ min-height: 80px; \}/);
 });

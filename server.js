@@ -754,28 +754,40 @@ app.get('/api/status', async (req, res) => {
     database: req.conns.pg.pgPoolDb,
   } : null;
 
-  // Query pg_stat_activity for the real server-side client count
+  // Query pg_stat_activity for the real server-side client count. The header
+  // only ever shows the count; the per-client rows (and their reverse-DNS
+  // lookups) are built solely for the clients panel, so they are opt-in via
+  // ?clients=full. The 5s status poll asks for them only while that panel is
+  // open — otherwise this aggregated ~70KB payload was rebuilt for nothing.
+  const wantClientRows = req.query.clients === 'full';
   let pgClients = null;
   if (req.conns.pg.pgPool && req.conns.pg.pgPoolDb) {
     try {
-      const r = await req.conns.pg.pgPool.query(
-        `SELECT count(*)::int AS n, json_agg(json_build_object(
-           'pid',      pid,
-           'db',       datname,
-           'user',     usename,
-           'app',      application_name,
-           'type',     backend_type,
-           'state',    state,
-           'wait',     coalesce(wait_event_type || '/' || wait_event, null),
-           'addr',     host(client_addr),
-           'query',    left(query, 120),
-           'duration', extract(epoch from (now() - state_change))::int
-         ) ORDER BY state_change DESC) AS rows
-         FROM pg_stat_activity
-         WHERE pid <> pg_backend_pid()`
-      );
-      pgClients = { count: r.rows[0].n, rows: r.rows[0].rows || [] };
-      pgClients.rows.forEach(c => { if (c.addr) c.host = rdnsLookup(c.addr); });
+      if (!wantClientRows) {
+        const r = await req.conns.pg.pgPool.query(
+          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid <> pg_backend_pid()`
+        );
+        pgClients = { count: r.rows[0].n, rows: null };
+      } else {
+        const r = await req.conns.pg.pgPool.query(
+          `SELECT count(*)::int AS n, json_agg(json_build_object(
+             'pid',      pid,
+             'db',       datname,
+             'user',     usename,
+             'app',      application_name,
+             'type',     backend_type,
+             'state',    state,
+             'wait',     coalesce(wait_event_type || '/' || wait_event, null),
+             'addr',     host(client_addr),
+             'query',    left(query, 120),
+             'duration', extract(epoch from (now() - state_change))::int
+           ) ORDER BY state_change DESC) AS rows
+           FROM pg_stat_activity
+           WHERE pid <> pg_backend_pid()`
+        );
+        pgClients = { count: r.rows[0].n, rows: r.rows[0].rows || [] };
+        pgClients.rows.forEach(c => { if (c.addr) c.host = rdnsLookup(c.addr); });
+      }
     } catch {}
   }
 
